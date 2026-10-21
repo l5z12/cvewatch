@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => ({
   worker: {
     name: WORKER,
     entrypoint: './src/index.ts',
-    compatibilityDate: mode === 'development' ? '2026-10-19' : '2026-10-22',
+    compatibilityDate: '2026-10-19',
     compatibilityFlags: ['nodejs_compat'],
     workersDev: true,
     exports: {

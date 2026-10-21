@@ -1,7 +1,12 @@
-import type { Cve } from './types';
+import type { Channel, Cve } from './types';
 
 // These two statements must be committed in the same batch as a source cursor.
-export function enqueueStatements(db: D1Database, cves: Cve[], discoveredAt: number): D1PreparedStatement[] {
+export function enqueueStatements(
+  db: D1Database,
+  cves: Cve[],
+  discoveredAt: number,
+  channels: Channel[],
+): D1PreparedStatement[] {
   const rows = JSON.stringify(cves.map((cve) => ({ id: cve.id, published: Date.parse(cve.published), payload: cve })));
   return [
     db
@@ -14,8 +19,9 @@ export function enqueueStatements(db: D1Database, cves: Cve[], discoveredAt: num
     db
       .prepare(
         `INSERT OR IGNORE INTO deliveries (cve_id, channel)
-      SELECT json_extract(j.value, '$.id'), s.channel FROM json_each(?) j CROSS JOIN channel_state s`,
+      SELECT json_extract(j.value, '$.id'), s.channel FROM json_each(?) j CROSS JOIN channel_state s
+      WHERE s.channel IN (SELECT value FROM json_each(?))`,
       )
-      .bind(rows),
+      .bind(rows, JSON.stringify(channels)),
   ];
 }

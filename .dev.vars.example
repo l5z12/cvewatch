@@ -1,6 +1,10 @@
 # Copy to .dev.vars for local use. Never commit real credentials.
-TELEGRAM_BOT_TOKEN="123456789:replace-with-botfather-token"
-TELEGRAM_CHAT_ID="@your_channel"
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123456789/replace-with-webhook-token"
+# Configure at least one destination. Leave unused destinations empty.
+# Telegram: set both fields, e.g. 123456789:botfather-token and @your_channel.
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+# Discord: set the webhook URL to enable delivery.
+# Example: https://discord.com/api/webhooks/123456789/replace-with-webhook-token
+DISCORD_WEBHOOK_URL=""
 # Optional: request a key at https://nvd.nist.gov/developers/request-an-api-key
 NVD_API_KEY=""

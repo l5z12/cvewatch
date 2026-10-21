@@ -1,6 +1,6 @@
 # CVE Watch
 
-Sends newly published CVEs to Telegram and Discord.
+Sends newly published CVEs to Telegram, Discord, or both.
 
 Checks CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. Includes unscored CVEs, deduplicates IDs, and retries failed deliveries. Upstream indexing and rate limits can delay alerts; exact publication-time delivery is not guaranteed. A crash after sending can occasionally cause a duplicate.
 
@@ -8,7 +8,7 @@ Checks CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. I
 
 Uses the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`) and Vite. Requires pnpm and a Cloudflare account; pnpm installs the pinned Node.js 24.22 runtime.
 
-1. Create a Telegram bot with [BotFather](https://t.me/BotFather), give it permission to post in your channel, and note the channel username or numeric ID. Create a Discord webhook under **Channel Settings > Integrations**.
+1. Choose your destinations: for Telegram, create a bot with [BotFather](https://t.me/BotFather), give it permission to post, and note the channel username or numeric ID. For Discord, create a webhook under **Channel Settings > Integrations**.
 2. Install and create the database:
 
    ```sh
@@ -18,10 +18,13 @@ Uses the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`) and Vite
    ```
 
 3. Configure GitHub Actions (repository or `production` environment):
-   - Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK_URL`. The deploy token needs **Workers Scripts: Edit** and **D1: Edit**.
+   - Deploy secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. The token needs **Workers Scripts: Edit** and **D1: Edit**.
+   - Destination secrets: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`, `DISCORD_WEBHOOK_URL`, or both. Configure at least one destination.
    - Variable: `D1_DATABASE_ID`, using the returned database ID.
    - Optional secret: `NVD_API_KEY`.
-4. Push or merge to `main`. CI checks the code, applies migrations, and deploys with the Worker secrets. Both destinations are required. Polling starts after cron propagation.
+4. Push or merge to `main`. CI checks the code, applies migrations, and deploys with the Worker secrets. Polling starts after cron propagation.
+
+Omit or leave unused destination secrets empty. Disabling a destination pauses its existing queue and stops adding new deliveries for it; queued alerts resume if you re-enable it.
 
 ## Settings
 

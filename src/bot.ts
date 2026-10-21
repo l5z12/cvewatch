@@ -1,7 +1,7 @@
 import { fetchPage } from './nvd';
 import { pollRecent } from './cve-search';
 import { enqueueStatements } from './outbox';
-import { send, validateSecrets } from './messages';
+import { enabledChannels, send, validateSecrets } from './messages';
 import { type BotEnv, type Channel, type Cve, type Runtime, integer, runtime, safeError, ServiceError } from './types';
 
 const MINUTE = 60_000;
@@ -37,7 +37,7 @@ export async function poll(env: BotEnv, rt: Runtime): Promise<void> {
   // A transaction stores every alert before advancing the cursor. json_each keeps
   // query count bounded even when the source returns a full page.
   await env.DB.batch([
-    ...enqueueStatements(env.DB, cves, now),
+    ...enqueueStatements(env.DB, cves, now, enabledChannels(env)),
     complete
       ? env.DB.prepare(
           `UPDATE poll_state SET watermark = ?, window_start = NULL, window_end = NULL,
@@ -61,10 +61,11 @@ interface PendingDelivery {
 
 export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promise<void> {
   const batch = integer(env.DELIVERY_BATCH_SIZE, 'DELIVERY_BATCH_SIZE', 1, 10);
+  const channels = enabledChannels(env);
   // Interleave platforms so one slow destination cannot consume the whole run.
   const blocked = new Set<Channel>();
   for (let i = 0; i < batch; i++) {
-    for (const channel of ['telegram', 'discord'] as const) {
+    for (const channel of channels) {
       if (rt.now() >= deadline) return;
       if (blocked.has(channel)) continue;
       const cooldown = await env.DB.prepare('SELECT next_send_at FROM channel_state WHERE channel = ?')

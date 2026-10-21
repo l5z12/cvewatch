@@ -1,5 +1,5 @@
 import { run } from './bot';
-import { validateSecrets } from './messages';
+import { enabledChannels, validateSecrets } from './messages';
 import { type BotEnv, safeError } from './types';
 export { PublicationMonitor } from './monitor';
 
@@ -31,8 +31,11 @@ export default {
       const pending = await env.DB.prepare(
         `SELECT channel, COUNT(*) AS pending,
         SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS retrying
-        FROM deliveries WHERE sent_at IS NULL GROUP BY channel`,
-      ).all<{ channel: string; pending: number; retrying: number }>();
+        FROM deliveries WHERE sent_at IS NULL
+        AND channel IN (SELECT value FROM json_each(?)) GROUP BY channel`,
+      )
+        .bind(JSON.stringify(enabledChannels(env)))
+        .all<{ channel: string; pending: number; retrying: number }>();
       const healthy =
         !!state?.last_success_at &&
         !state.last_error &&

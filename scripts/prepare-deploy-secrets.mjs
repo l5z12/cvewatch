@@ -6,11 +6,14 @@ if (!output) {
   process.exit(1);
 }
 
-const required = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'DISCORD_WEBHOOK_URL'];
-const secrets = Object.fromEntries([...required, 'NVD_API_KEY'].map((name) => [name, process.env[name]?.trim() || '']));
-const missing = required.filter((name) => !secrets[name]);
-if (missing.length) {
-  console.error(`Missing required Worker secrets: ${missing.join(', ')}`);
+const names = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'DISCORD_WEBHOOK_URL', 'NVD_API_KEY'];
+const secrets = Object.fromEntries(names.map((name) => [name, process.env[name]?.trim() || '']));
+if (Boolean(secrets.TELEGRAM_BOT_TOKEN) !== Boolean(secrets.TELEGRAM_CHAT_ID)) {
+  console.error('Set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or leave both empty.');
+  process.exit(1);
+}
+if (!secrets.TELEGRAM_BOT_TOKEN && !secrets.DISCORD_WEBHOOK_URL) {
+  console.error('Configure Telegram or Discord before deploying.');
   process.exit(1);
 }
 

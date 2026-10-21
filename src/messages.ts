@@ -24,13 +24,25 @@ export function message(cve: Cve): string {
   ].join('\n');
 }
 
+export function enabledChannels(env: BotEnv): Channel[] {
+  const channels: Channel[] = [];
+  if (env.TELEGRAM_BOT_TOKEN?.trim() && env.TELEGRAM_CHAT_ID?.trim()) channels.push('telegram');
+  if (env.DISCORD_WEBHOOK_URL?.trim()) channels.push('discord');
+  return channels;
+}
+
 export function validateSecrets(env: BotEnv): void {
-  if (!env.TELEGRAM_BOT_TOKEN?.trim() || !/^\d+:[\w-]+$/.test(env.TELEGRAM_BOT_TOKEN)) {
-    throw new ServiceError('Configure TELEGRAM_BOT_TOKEN');
+  if (env.TELEGRAM_BOT_TOKEN?.trim() || env.TELEGRAM_CHAT_ID?.trim()) {
+    if (!env.TELEGRAM_BOT_TOKEN || !/^\d+:[\w-]+$/.test(env.TELEGRAM_BOT_TOKEN)) {
+      throw new ServiceError('Configure TELEGRAM_BOT_TOKEN');
+    }
+    if (!env.TELEGRAM_CHAT_ID || !/^(?:-?\d+|@[a-zA-Z0-9_]+)$/.test(env.TELEGRAM_CHAT_ID)) {
+      throw new ServiceError('Configure TELEGRAM_CHAT_ID');
+    }
   }
-  if (!env.TELEGRAM_CHAT_ID || !/^(?:-?\d+|@[a-zA-Z0-9_]+)$/.test(env.TELEGRAM_CHAT_ID)) {
-    throw new ServiceError('Configure TELEGRAM_CHAT_ID');
-  }
+  const channels = enabledChannels(env);
+  if (channels.length === 0) throw new ServiceError('Configure Telegram or Discord');
+  if (!channels.includes('discord')) return;
   let url: URL;
   try {
     url = new URL(env.DISCORD_WEBHOOK_URL ?? '');

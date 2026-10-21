@@ -26,6 +26,7 @@ export default defineConfig(({ mode }) => ({
       LIVE_POLL_SECONDS: bindings.text('15'),
       SOURCE_USER_AGENT: bindings.text('cvewatch/1.0 (https://github.com/l5z12/cvewatch)'),
       DELIVERY_BATCH_SIZE: bindings.text('4'),
+      // CI supplies empty secrets for disabled destinations.
       TELEGRAM_BOT_TOKEN: bindings.secret(),
       TELEGRAM_CHAT_ID: bindings.secret(),
       DISCORD_WEBHOOK_URL: bindings.secret(),

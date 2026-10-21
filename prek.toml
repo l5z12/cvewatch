@@ -1,0 +1,24 @@
+#:schema https://www.schemastore.org/prek.json
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace", args = ["--markdown-linebreak-ext=md"] },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+  { id = "check-merge-conflict" },
+  { id = "check-case-conflict" },
+  { id = "check-added-large-files" },
+  { id = "check-json" },
+  # pnpm's lockfile contains multiple YAML documents.
+  { id = "check-yaml", args = ["--allow-multiple-documents"] },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "prettier", name = "prettier", language = "system", entry = "pnpm exec prettier --write --ignore-unknown", types = ["text"] },
+  # Generates Worker types and checks the whole project once per commit.
+  { id = "typecheck", name = "typecheck", language = "system", entry = "pnpm run typecheck", types_or = ["ts", "tsx"], pass_filenames = false },
+]

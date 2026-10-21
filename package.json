@@ -1,0 +1,44 @@
+{
+  "name": "cvewatch",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": "^22.23.0 || ^24.22.0 || ^26.12.0"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24.22.0",
+      "onFail": "download"
+    }
+  },
+  "scripts": {
+    "hooks:install": "prek install",
+    "hooks:check": "prek run --all-files",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dev": "vite dev",
+    "cf-typegen": "cf workers types",
+    "typecheck": "pnpm cf-typegen && tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build && cf deploy --prebuilt --mode production --dry-run",
+    "build": "vite build",
+    "db:migrate:local": "cf d1 migrations apply 00000000-0000-4000-8000-00000000d1d1 --local --persist-to .cloudflare/state --mode development",
+    "db:migrate:remote": "cf d1 migrations apply",
+    "deploy": "cf deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-beta.v.3",
+    "@cloudflare/vitest-plugin": "1.4.6",
+    "@j178/prek": "0.5.5",
+    "@types/node": "26.6.5",
+    "cf": "1.0.0-beta.20",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "4.1.0"
+  }
+}

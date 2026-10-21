@@ -1,0 +1,6 @@
+.cloudflare/
+.wrangler/
+dist/
+coverage/
+pnpm-lock.yaml
+migrations/

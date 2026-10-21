@@ -1,0 +1,9 @@
+CVE Watch
+Copyright 2026 l5z12
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Generated runtime declarations in .cloudflare/types retain the copyright and
+license notices supplied by Cloudflare and Microsoft.
+
+Third-party dependencies and CVE/NVD data retain their original licenses and terms.

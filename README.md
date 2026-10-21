@@ -1,3 +1,5 @@
+<img src="public/icon.svg" width="64" height="64" alt="Globe Shield icon">
+
 # CVE Watch
 
 Sends newly published CVEs to Telegram, Discord, or both.
@@ -25,6 +27,8 @@ Uses the [Cloudflare CLI](https://developers.cloudflare.com/cf/) (`cf`) and Vite
 4. Push or merge to `main`. CI checks the code, applies migrations, and deploys with the Worker secrets. Polling starts after cron propagation.
 
 Omit or leave unused destination secrets empty. Disabling a destination pauses its existing queue and stops adding new deliveries for it; queued alerts resume if you re-enable it.
+
+Discord alerts use the project icon hosted at `/icon.png`. For Telegram, upload [public/icon.png](public/icon.png) as the bot's profile picture through [BotFather](https://t.me/BotFather). Icon attribution and its MIT license are included in [NOTICE](NOTICE).
 
 ## Settings
 

@@ -74,6 +74,7 @@ export async function send(channel: Channel, cve: Cve, env: BotEnv, rt: Runtime)
       ? { chat_id: env.TELEGRAM_CHAT_ID, text, link_preview_options: { is_disabled: true } }
       : {
           username: 'CVE Watch',
+          avatar_url: 'https://cvewatch.l5z12.dev/icon.png',
           allowed_mentions: { parse: [] },
           embeds: [{ description: text, color: cve.severity === 'CRITICAL' ? 0xdc2626 : 0x2563eb }],
         };

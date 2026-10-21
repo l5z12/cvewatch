@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { applyD1Migrations, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deliver, poll, run, runLive } from '../src/bot';
+import { DELTA_URL, pollDelta, recordUrl } from '../src/cve-list';
 import { fetchRecentPage, parseCveRecord, pollRecent } from '../src/cve-search';
 import worker from '../src/index';
 import { message, send, validateSecrets } from '../src/messages';
@@ -81,7 +82,7 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(async () => {
   await env.DB.batch([
-    ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'run_lock'].map((table) =>
+    ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'delta_poll_state', 'run_lock'].map((table) =>
       env.DB.prepare(`DELETE FROM ${table}`),
     ),
     env.DB.prepare('UPDATE channel_state SET next_send_at = 0'),
@@ -403,6 +404,7 @@ describe('formatting and configuration', () => {
     await env.DB.prepare('INSERT INTO live_poll_state (id, watermark, last_success_at) VALUES (1, ?, ?)')
       .bind(now, now)
       .run();
+    await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
     const health = () => worker.fetch(new Request('https://worker.test/api/health/'), botEnv());
     expect((await health()).status).toBe(200);
     await env.DB.prepare("UPDATE deliveries SET last_error = 'discord HTTP/API 403' WHERE channel = 'discord'").run();
@@ -427,6 +429,7 @@ describe('destination health endpoints', () => {
     await env.DB.prepare('INSERT INTO live_poll_state (id, watermark, last_success_at) VALUES (1, ?, ?)')
       .bind(now, now)
       .run();
+    await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
   });
 
   it.each(['telegram', 'discord'] as const)('isolates %s delivery health without sending messages', async (channel) => {
@@ -447,6 +450,7 @@ describe('destination health endpoints', () => {
       checks: {
         database: [{ status: 'pass' }],
         nvd: [{ status: 'pass' }],
+        'cve-list': [{ status: 'pass' }],
         'cve-search': [{ status: 'pass' }],
         [channel]: [{ componentId: channel, status: 'pass', observedValue: 1, observedUnit: 'messages' }],
       },
@@ -467,14 +471,17 @@ describe('destination health endpoints', () => {
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(2);
   });
 
-  it.each(['poll_state', 'live_poll_state'])('includes shared %s failures in both endpoints', async (table) => {
-    await env.DB.prepare(`UPDATE ${table} SET last_success_at = ?`)
-      .bind(Date.now() - 60 * 60_000)
-      .run();
-    for (const channel of ['telegram', 'discord']) {
-      expect((await health(`/api/health/${channel}/`)).status).toBe(503);
-    }
-  });
+  it.each(['poll_state', 'live_poll_state', 'delta_poll_state'])(
+    'includes shared %s failures in both endpoints',
+    async (table) => {
+      await env.DB.prepare(`UPDATE ${table} SET last_success_at = ?`)
+        .bind(Date.now() - 60 * 60_000)
+        .run();
+      for (const channel of ['telegram', 'discord']) {
+        expect((await health(`/api/health/${channel}/`)).status).toBe(503);
+      }
+    },
+  );
 
   it.each(['telegram', 'discord'] as const)(
     'fails for disabled %s without affecting the enabled destination',
@@ -527,21 +534,90 @@ const searchPage = (records: unknown[], pageNumber = 1, totalResults = records.l
     },
   });
 
+const delta = (ids: string[], fetchTime = new Date(NOW - 1000).toISOString()) =>
+  Response.json({
+    fetchTime,
+    numberOfChanges: ids.length,
+    new: ids.map((cveId) => ({ cveId })),
+    updated: [],
+    error: [],
+  });
+
+describe('new records from the CVE List', () => {
+  it('fetches only newly listed records, once', async () => {
+    const { rt, mockFetch } = clock();
+    const id = 'CVE-2026-114383';
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === DELTA_URL ? delta([id]) : Response.json(programRecord(id)),
+    );
+    await pollDelta(botEnv(), rt);
+    expect(recordUrl(id)).toBe(
+      'https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/114xxx/CVE-2026-114383.json',
+    );
+    expect(mockFetch.mock.calls.map(([url]) => String(url))).toEqual([DELTA_URL, recordUrl(id)]);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries').first('n')).toBe(2);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ id, source: 'CVE Program' });
+    await pollDelta(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('skips known records, continues large deltas, and ignores stale copies', async () => {
+    const { rt, mockFetch, advance } = clock();
+    const ids = Array.from({ length: 25 }, (_, i) => `CVE-2026-${70000 + i}`);
+    await seed([{ ...cve(), id: ids[0]! }]);
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === DELTA_URL ? delta(ids) : Response.json(programRecord(String(url).match(/CVE-[\d-]+/)![0])),
+    );
+    await pollDelta(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(20);
+    advance(15_000);
+    await pollDelta(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(26);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM cves').first('n')).toBe(25);
+    mockFetch.mockImplementationOnce(async () => delta(['CVE-2026-79999'], new Date(NOW - 60_000).toISOString()));
+    await pollDelta(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(27);
+    expect(await env.DB.prepare('SELECT next_index FROM delta_poll_state').first('next_index')).toBe(25);
+  });
+
+  it('keeps polling CVE Search when the CVE List fails', async () => {
+    const { rt, mockFetch } = clock();
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === DELTA_URL
+        ? new Response('Unavailable', { status: 503 })
+        : String(url).includes('search.cve.org')
+          ? searchPage([programRecord()])
+          : String(url).includes('telegram')
+            ? Response.json({ ok: true })
+            : Response.json({ id: 'sent' }),
+    );
+    await runLive(botEnv(), rt);
+    expect(await env.DB.prepare('SELECT last_error FROM delta_poll_state').first('last_error')).toBe(
+      'CVE List HTTP 503',
+    );
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM cves').first('n')).toBe(1);
+  });
+});
+
 describe('recent publications from the CVE Program', () => {
   it('sends a one-second-old unscored publication to both destinations without NVD', async () => {
     const { rt, mockFetch } = clock();
     mockFetch.mockImplementation(async (url) =>
-      String(url).includes('search.cve.org')
-        ? searchPage([programRecord()])
-        : String(url).includes('telegram')
-          ? Response.json({ ok: true })
-          : Response.json({ id: 'sent' }),
+      String(url) === DELTA_URL
+        ? delta([])
+        : String(url).includes('search.cve.org')
+          ? searchPage([programRecord()])
+          : String(url).includes('telegram')
+            ? Response.json({ ok: true })
+            : Response.json({ id: 'sent' }),
     );
     await runLive(botEnv(), rt);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
     expect(mockFetch.mock.calls.every(([url]) => !String(url).includes('nist.gov'))).toBe(true);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NOT NULL').first('n')).toBe(2);
-    const request = JSON.parse(String(mockFetch.mock.calls[0]![1]?.body));
+    const search = mockFetch.mock.calls.find(([url]) => String(url).includes('search.cve.org'))!;
+    const request = JSON.parse(String(search[1]?.body));
     expect(request.pubEndDate).toBe(new Date(NOW).toISOString());
     expect(request).not.toHaveProperty('cvssV3Severity');
     const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);

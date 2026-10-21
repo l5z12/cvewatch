@@ -1,4 +1,5 @@
 import { fetchPage } from './nvd';
+import { pollDelta } from './cve-list';
 import { pollRecent } from './cve-search';
 import { enqueueStatements } from './outbox';
 import { enabledChannels, send, validateSecrets } from './messages';
@@ -175,6 +176,13 @@ export async function run(env: BotEnv, rt: Runtime = runtime): Promise<void> {
 export async function runLive(env: BotEnv, rt: Runtime = runtime): Promise<void> {
   const now = rt.now();
   await withLease(env, rt, async () => {
+    // The CVE List is the fastest source. CVE Search catches deltas it misses.
+    try {
+      await pollDelta(env, rt);
+    } catch (error) {
+      await env.DB.prepare('UPDATE delta_poll_state SET last_error = ? WHERE id = 1').bind(safeError(error)).run();
+      console.error(JSON.stringify({ event: 'cve_list_failed', error: safeError(error), elapsedMs: rt.now() - now }));
+    }
     try {
       await pollRecent(env, rt);
     } catch (error) {

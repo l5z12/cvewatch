@@ -3,7 +3,7 @@ import { type Runtime, errorDetails, safeError, ServiceError } from './types';
 // Keep the deadline active through body consumption, and cancel its timer once done.
 // Only log fixed service names and diagnostics: messaging URLs contain credentials.
 export async function serviceRequest<T>(
-  service: 'NVD' | 'CVE Search' | 'telegram' | 'discord',
+  service: 'NVD' | 'CVE Search' | 'CVE List' | 'telegram' | 'discord',
   url: string | URL,
   init: RequestInit,
   rt: Runtime,

@@ -9,7 +9,8 @@ license notices supplied by Cloudflare and Microsoft.
 Third-party dependencies and CVE/NVD data retain their original licenses and terms.
 
 The project icon (public/icon.svg) is the Globe Shield 48 Color icon from
-Microsoft Fluent UI System Icons. public/icon.png is a rasterized copy.
+Microsoft Fluent UI System Icons. public/icon.png is a rasterized copy,
+scaled to 70% with padding for circular avatars.
 Source: https://github.com/microsoft/fluentui-system-icons/blob/main/assets/Globe%20Shield/SVG/ic_fluent_globe_shield_48_color.svg
 License: https://github.com/microsoft/fluentui-system-icons/blob/main/LICENSE
 

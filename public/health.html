@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cvewatch status</title>
+    <link rel="icon" href="/icon.svg" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --pass: #15803d;
+        --pass-bg: #dcfce7;
+        --fail: #b91c1c;
+        --fail-bg: #fee2e2;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d1014;
+          --card: #161a20;
+          --text: #e5e7eb;
+          --muted: #9ca3af;
+          --border: #262b33;
+          --pass: #4ade80;
+          --pass-bg: rgb(74 222 128 / 0.12);
+          --fail: #f87171;
+          --fail-bg: rgb(248 113 113 / 0.12);
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+      }
+      main {
+        max-width: 36rem;
+        margin: 0 auto;
+        padding: 3rem 1rem;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1.5rem;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+      .banner,
+      ul {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      .banner {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding: 1rem 1.25rem;
+        font-weight: 600;
+      }
+      .banner.pass {
+        background: var(--pass-bg);
+        border-color: transparent;
+      }
+      .banner.fail {
+        background: var(--fail-bg);
+        border-color: transparent;
+      }
+      ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.875rem 1.25rem;
+      }
+      li + li {
+        border-top: 1px solid var(--border);
+      }
+      .name {
+        font-weight: 500;
+      }
+      .detail,
+      footer {
+        color: var(--muted);
+        font-size: 0.8125rem;
+      }
+      .state {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.875rem;
+        white-space: nowrap;
+      }
+      .dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: currentColor;
+        flex: none;
+      }
+      .pass {
+        color: var(--pass);
+      }
+      .fail {
+        color: var(--fail);
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 1rem;
+      }
+      footer a {
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="/icon.svg" alt="" width="32" height="32" />
+        <h1>cvewatch</h1>
+      </header>
+      <div id="banner" class="banner"><span class="dot"></span>Checking status…</div>
+      <ul id="checks"></ul>
+      <footer>
+        <span id="updated"></span>
+        <a href="/api/health/">JSON</a>
+      </footer>
+    </main>
+    <script>
+      const labels = {
+        database: 'Database',
+        nvd: 'NVD',
+        'cve-list': 'CVE List',
+        'cve-search': 'CVE Search',
+        telegram: 'Telegram',
+        discord: 'Discord',
+      };
+      const ago = (ms) =>
+        ms < 120e3
+          ? `${Math.round(ms / 1e3)}s ago`
+          : ms < 72e5
+            ? `${Math.round(ms / 6e4)}m ago`
+            : `${Math.round(ms / 36e5)}h ago`;
+      const observed = ({ observedValue: value, observedUnit: unit }) =>
+        value === undefined ? '' : unit === 'ms' ? `Last success ${ago(value)}` : `${value} pending`;
+
+      function el(tag, className, ...children) {
+        const node = document.createElement(tag);
+        node.className = className;
+        node.append(...children);
+        return node;
+      }
+
+      function render(status, summary, rows) {
+        document.getElementById('banner').className = `banner ${status}`;
+        document.getElementById('banner').replaceChildren(el('span', `dot ${status}`), summary);
+        document
+          .getElementById('checks')
+          .replaceChildren(
+            ...rows.map((row) =>
+              el(
+                'li',
+                '',
+                el('div', '', el('div', 'name', row.name), el('div', 'detail', row.detail)),
+                el('span', `state ${row.status}`, el('span', 'dot'), row.status === 'pass' ? 'Operational' : 'Failing'),
+              ),
+            ),
+          );
+        document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      }
+
+      // The page only reads /api/health/, which never triggers polls or sends.
+      async function load() {
+        try {
+          const body = await (await fetch('/api/health/', { cache: 'no-store' })).json();
+          const rows = Object.entries(body.checks ?? {}).map(([name, [check]]) => ({
+            name: labels[name] ?? name,
+            status: check.status,
+            // Only the database check has nothing to report when it passes.
+            detail: [observed(check), check.output].filter(Boolean).join(' · ') || 'Connected',
+          }));
+          if (body.output) rows.push({ name: 'Service', status: body.status, detail: body.output });
+          render(body.status, body.status === 'pass' ? 'All systems operational' : 'Some systems are failing', rows);
+        } catch {
+          render('fail', 'Status unavailable', [
+            { name: 'Health API', status: 'fail', detail: 'The health endpoint could not be reached.' },
+          ]);
+        }
+      }
+
+      load();
+      setInterval(load, 30_000);
+    </script>
+  </body>
+</html>

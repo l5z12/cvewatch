@@ -345,8 +345,11 @@ describe('formatting and configuration', () => {
   });
 
   it('has no public endpoint that can trigger notifications', async () => {
-    const response = await worker.fetch(new Request('https://worker.test/run', { method: 'POST' }), botEnv());
-    expect(response.status).toBe(404);
+    for (const path of ['/run', '/health', '/health/telegram', '/health/discord']) {
+      const response = await worker.fetch(new Request(`https://worker.test${path}`, { method: 'POST' }), botEnv());
+      expect(response.status).toBe(404);
+    }
+    expect((await worker.fetch(new Request('https://worker.test/health/slack'), botEnv())).status).toBe(404);
     expect((await worker.fetch(new Request('https://worker.test/health'), botEnv())).status).toBe(503);
   });
 
@@ -368,6 +371,94 @@ describe('formatting and configuration', () => {
       .bind(now - 60 * 60_000)
       .run();
     expect((await health()).status).toBe(503);
+  });
+});
+
+describe('destination health endpoints', () => {
+  const health = (path: string, config = botEnv()) => worker.fetch(new Request(`https://worker.test${path}`), config);
+
+  beforeEach(async () => {
+    const now = Date.now();
+    await seed();
+    await env.DB.prepare('INSERT INTO poll_state (id, not_before, watermark, last_success_at) VALUES (1, ?, ?, ?)')
+      .bind(now, now, now)
+      .run();
+    await env.DB.prepare('INSERT INTO live_poll_state (id, watermark, last_success_at) VALUES (1, ?, ?)')
+      .bind(now, now)
+      .run();
+  });
+
+  it.each(['telegram', 'discord'] as const)('isolates %s delivery health without sending messages', async (channel) => {
+    const other = channel === 'telegram' ? 'discord' : 'telegram';
+    const network = vi.mocked(fetch);
+    network.mockClear();
+    await env.DB.prepare('UPDATE deliveries SET last_error = ? WHERE channel = ?')
+      .bind(`${other} HTTP/API 403`, other)
+      .run();
+
+    const response = await health(`/health/${channel}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('application/health+json');
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    const body = await response.json();
+    expect(body).toMatchObject({
+      status: 'pass',
+      checks: {
+        database: [{ status: 'pass' }],
+        nvd: [{ status: 'pass' }],
+        'cve-search': [{ status: 'pass' }],
+        [channel]: [{ componentId: channel, status: 'pass', observedValue: 1, observedUnit: 'messages' }],
+      },
+    });
+    expect(body).not.toHaveProperty(`checks.${other}`);
+    expect((await health('/health')).status).toBe(503);
+
+    await env.DB.prepare('UPDATE deliveries SET last_error = ? WHERE channel = ?')
+      .bind(`${channel} HTTP/API 403`, channel)
+      .run();
+    const failed = await health(`/health/${channel}`);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({
+      status: 'fail',
+      checks: { [channel]: [{ status: 'fail', output: '1 pending deliveries are awaiting retry.' }] },
+    });
+    expect(network).not.toHaveBeenCalled();
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(2);
+  });
+
+  it.each(['poll_state', 'live_poll_state'])('includes shared %s failures in both endpoints', async (table) => {
+    await env.DB.prepare(`UPDATE ${table} SET last_success_at = ?`)
+      .bind(Date.now() - 60 * 60_000)
+      .run();
+    for (const channel of ['telegram', 'discord']) {
+      expect((await health(`/health/${channel}`)).status).toBe(503);
+    }
+  });
+
+  it.each(['telegram', 'discord'] as const)(
+    'fails for disabled %s without affecting the enabled destination',
+    async (channel) => {
+      const config = {
+        ...botEnv(),
+        ...(channel === 'telegram' ? { TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' } : { DISCORD_WEBHOOK_URL: '' }),
+      };
+      const response = await health(`/health/${channel}`, config);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ status: 'fail', output: `${channel} is not configured.` });
+      expect((await health('/health', config)).status).toBe(200);
+      expect((await health(`/health/${channel === 'telegram' ? 'discord' : 'telegram'}`, config)).status).toBe(200);
+    },
+  );
+
+  it('fails both endpoints when shared configuration prevents polling', async () => {
+    for (const channel of ['telegram', 'discord']) {
+      const response = await health(`/health/${channel}`, { ...botEnv(), TELEGRAM_BOT_TOKEN: undefined });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        status: 'fail',
+        output: 'Configuration or storage is unavailable.',
+      });
+    }
   });
 });
 

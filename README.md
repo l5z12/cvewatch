@@ -60,7 +60,7 @@ This starts recurring alarms and sends real messages. Local NVD recovery needs r
 
 ## Monitoring
 
-Use Cloudflare's Worker logs dashboard or `GET /health` for source freshness and delivery status. Delivery logs include publication-to-send latency. HTTP 503 indicates startup, missing configuration, or degraded operation.
+Use `/health` for overall status, or `/health/telegram` and `/health/discord` for each destination. HTTP 200 means healthy; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
 
 This product uses data from the NVD API but is not endorsed or certified by the NVD.
 

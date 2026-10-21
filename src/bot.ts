@@ -3,6 +3,7 @@ import { pollDelta } from './cve-list';
 import { pollRecent } from './cve-search';
 import { enqueueStatements } from './outbox';
 import { enabledChannels, send, validateSecrets } from './messages';
+import { processRequests } from './requests';
 import { type BotEnv, type Channel, type Cve, type Runtime, integer, runtime, safeError, ServiceError } from './types';
 
 const MINUTE = 60_000;
@@ -207,6 +208,11 @@ export async function runLive(env: BotEnv, rt: Runtime = runtime): Promise<void>
           elapsedMs: rt.now() - now,
         }),
       );
+    }
+    try {
+      await processRequests(env, rt);
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'requests_failed', error: safeError(error), elapsedMs: rt.now() - now }));
     }
     await deliver(env, rt, now + 45_000);
   });

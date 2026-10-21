@@ -6,7 +6,8 @@ import { DELTA_URL, pollDelta, recordUrl } from '../src/cve-list';
 import { fetchRecentPage, parseCveRecord, pollRecent } from '../src/cve-search';
 import worker from '../src/index';
 import { message, send, validateSecrets } from '../src/messages';
-import { fetchPage, PAGE_SIZE, parseCve } from '../src/nvd';
+import { fetchPage, NVD_URL, PAGE_SIZE, parseCve } from '../src/nvd';
+import { processRequests } from '../src/requests';
 import { type BotEnv, type Cve, type Runtime, readJson, ServiceError } from '../src/types';
 
 const NOW = Date.parse('2026-10-22T06:00:00Z');
@@ -82,8 +83,8 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(async () => {
   await env.DB.batch([
-    ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'delta_poll_state', 'run_lock'].map((table) =>
-      env.DB.prepare(`DELETE FROM ${table}`),
+    ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'delta_poll_state', 'run_lock', 'send_requests'].map(
+      (table) => env.DB.prepare(`DELETE FROM ${table}`),
     ),
     env.DB.prepare('UPDATE channel_state SET next_send_at = 0'),
   ]);
@@ -824,6 +825,153 @@ describe('recent publications from the CVE Program', () => {
     } finally {
       await env.DB.prepare('DROP TRIGGER fail_live_delivery').run();
     }
+  });
+});
+
+describe('requested CVEs', () => {
+  const ID = 'CVE-2021-44228';
+  const PUBLISHED = '2021-12-10T10:15:09.143Z';
+  const request = (id = ID) =>
+    env.DB.prepare('INSERT INTO send_requests (cve_id, requested_at) VALUES (?, ?)').bind(id, NOW).run();
+  const requestRow = (id = ID) =>
+    env.DB.prepare('SELECT attempts, next_attempt_at, failed_at, last_error FROM send_requests WHERE cve_id = ?')
+      .bind(id)
+      .first();
+  const scored = (id = ID, published = PUBLISHED) => {
+    const record = programRecord(id, published);
+    return {
+      ...record,
+      containers: {
+        cna: {
+          ...record.containers.cna,
+          metrics: [{ cvssV3_1: { version: '3.1', baseScore: 10, baseSeverity: 'CRITICAL' } }],
+        },
+      },
+    };
+  };
+
+  it('resends an already delivered CVE to both destinations on the next live run', async () => {
+    const { rt, mockFetch } = clock();
+    await seed([{ ...cve(), id: ID, published: PUBLISHED }]);
+    await env.DB.prepare('UPDATE deliveries SET sent_at = ?, attempts = 1')
+      .bind(NOW - 60_000)
+      .run();
+    await request();
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === DELTA_URL
+        ? delta([])
+        : String(url).includes('search.cve.org')
+          ? searchPage([])
+          : String(url) === recordUrl(ID)
+            ? Response.json(scored())
+            : String(url).includes('telegram')
+              ? Response.json({ ok: true })
+              : Response.json({ id: 'sent' }),
+    );
+    await runLive(botEnv(), rt);
+    expect(mockFetch.mock.calls.every(([url]) => !String(url).includes('nist.gov'))).toBe(true);
+    const sends = mockFetch.mock.calls.filter(([url]) => /telegram|discord/.test(String(url)));
+    expect(sends).toHaveLength(2);
+    expect(JSON.parse(String(sends[0]![1]?.body)).text).toMatch(/^CVE-2021-44228\nCRITICAL · 10\.0\/10/);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at = ?').bind(NOW).first('n')).toBe(2);
+    expect(await requestRow()).toBeNull();
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ requested: true, source: 'CVE Program', score: 10 });
+  });
+
+  it('uses NVD scores for records without CNA metrics', async () => {
+    const { rt, mockFetch } = clock();
+    await request();
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === recordUrl(ID)
+        ? Response.json(programRecord(ID, PUBLISHED))
+        : page([
+            rawCve(ID, {
+              published: '2021-12-10T10:15:09.143',
+              cisaExploitAdd: '2021-12-10',
+              metrics: {
+                cvssMetricV31: [
+                  { type: 'Primary', cvssData: { version: '3.1', baseScore: 10, baseSeverity: 'CRITICAL' } },
+                ],
+              },
+            }),
+          ]),
+    );
+    await processRequests(botEnv(), rt);
+    const nvd = new URL(String(mockFetch.mock.calls[1]![0]));
+    expect(nvd.origin + nvd.pathname).toBe(NVD_URL);
+    expect(nvd.searchParams.get('cveId')).toBe(ID);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ source: 'NVD', score: 10, exploited: true, requested: true });
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(2);
+  });
+
+  it('sends the unscored record when NVD is unavailable', async () => {
+    const { rt, mockFetch } = clock();
+    await request();
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === recordUrl(ID) ? Response.json(programRecord(ID, PUBLISHED)) : new Response(null, { status: 503 }),
+    );
+    await processRequests(botEnv(), rt);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ source: 'CVE Program', score: null, published: PUBLISHED });
+    expect(await requestRow()).toBeNull();
+  });
+
+  it('fails missing, unpublished, and malformed IDs once without retrying', async () => {
+    const { rt, mockFetch, advance } = clock();
+    const rejected = programRecord('CVE-2026-50001');
+    await Promise.all([request('CVE-2026-50000'), request('CVE-2026-50001'), request('cve-1')]);
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === recordUrl('CVE-2026-50001')
+        ? Response.json({ ...rejected, cveMetadata: { ...rejected.cveMetadata, state: 'REJECTED' } })
+        : new Response('404: Not Found', { status: 404 }),
+    );
+    await processRequests(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(await requestRow('CVE-2026-50000')).toMatchObject({
+      failed_at: NOW,
+      last_error: 'Not found in the CVE List',
+    });
+    expect(await requestRow('CVE-2026-50001')).toMatchObject({ failed_at: NOW, last_error: 'Not a published CVE' });
+    expect(await requestRow('cve-1')).toMatchObject({ failed_at: NOW, last_error: 'Invalid CVE ID' });
+    advance(24 * 60 * 60_000);
+    await processRequests(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM cves').first('n')).toBe(0);
+  });
+
+  it('backs off transient failures and then queues the CVE', async () => {
+    const { rt, mockFetch, advance } = clock();
+    await request();
+    mockFetch.mockResolvedValueOnce(new Response('Unavailable', { status: 503 }));
+    await processRequests(botEnv(), rt);
+    expect(await requestRow()).toMatchObject({
+      attempts: 1,
+      next_attempt_at: NOW + 60_000,
+      failed_at: null,
+      last_error: 'CVE List HTTP 503',
+    });
+    await processRequests(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    advance(60_000);
+    mockFetch.mockResolvedValueOnce(Response.json(scored()));
+    await processRequests(botEnv(), rt);
+    expect(await requestRow()).toBeNull();
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries').first('n')).toBe(2);
+  });
+
+  it('does not let a later poll send a requested CVE again', async () => {
+    const { rt, mockFetch } = clock();
+    const id = 'CVE-2026-50000';
+    await request(id);
+    mockFetch.mockResolvedValueOnce(Response.json(scored(id, new Date(NOW - 1000).toISOString())));
+    await processRequests(botEnv(), rt);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    await env.DB.prepare('UPDATE deliveries SET sent_at = ?').bind(NOW).run();
+    mockFetch.mockResolvedValueOnce(searchPage([programRecord(id)]));
+    await pollRecent(botEnv(), rt);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
   });
 });
 

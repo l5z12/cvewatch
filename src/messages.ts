@@ -12,7 +12,7 @@ export function message(cve: Cve): string {
       ? 'not scored yet'
       : `${cve.score.toFixed(1)}/10${cve.cvssVersion ? ` (CVSS ${cve.cvssVersion})` : ''}`;
   return [
-    `New CVE: ${cve.id}`,
+    cve.requested ? cve.id : `New CVE: ${cve.id}`,
     `${cve.severity} · ${score}`,
     `Published: ${cve.published.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')}`,
     `Source: ${cve.source ?? 'NVD'}`,

@@ -66,6 +66,16 @@ This starts recurring alarms and sends real messages. Local NVD recovery needs r
 
 Open `/health` for a status page. Use `/api/health/` for overall status, or `/api/health/telegram/` and `/api/health/discord/` for each destination. HTTP 200 means healthy, with status `warn` if the last NVD recovery poll failed but NVD data is still fresh; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
 
+## Send an existing CVE
+
+Run the **Send CVE** workflow from the Actions tab and enter a CVE ID. It uses the deploy secrets and variable, waits for the Worker, and fails if the CVE cannot be sent. From a terminal signed in with `cf login`:
+
+```sh
+D1_DATABASE_ID=<database-id> pnpm send CVE-2024-3094
+```
+
+The Worker picks up the request within about 15 seconds and sends the CVE List record, using NVD scores when the record has none. The CVE is sent to every enabled destination, even if it was alerted before, and queues behind newer pending alerts. Its message starts with the ID instead of "New CVE". The request is stored in the production database, so this does not work with the local dev server.
+
 This product uses data from the NVD API but is not endorsed or certified by the NVD.
 
 ## License

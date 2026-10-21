@@ -25,3 +25,28 @@ export function enqueueStatements(
       .bind(rows, JSON.stringify(channels)),
   ];
 }
+
+// Requested CVEs are resent even if already delivered, with a refreshed payload.
+// Commit these in the same batch that removes the request.
+export function resendStatements(
+  db: D1Database,
+  cve: Cve,
+  requestedAt: number,
+  channels: Channel[],
+): D1PreparedStatement[] {
+  return [
+    db
+      .prepare(
+        `INSERT INTO cves (id, published_at, payload, discovered_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET payload = excluded.payload`,
+      )
+      .bind(cve.id, Date.parse(cve.published), JSON.stringify(cve), requestedAt),
+    db
+      .prepare(
+        `INSERT INTO deliveries (cve_id, channel)
+      SELECT ?, channel FROM channel_state WHERE channel IN (SELECT value FROM json_each(?))
+      ON CONFLICT(cve_id, channel) DO UPDATE SET attempts = 0, next_attempt_at = 0, sent_at = NULL, last_error = NULL`,
+      )
+      .bind(cve.id, JSON.stringify(channels)),
+  ];
+}

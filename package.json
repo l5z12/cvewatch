@@ -28,7 +28,8 @@
     "build": "vite build",
     "db:migrate:local": "cf d1 migrations apply 00000000-0000-4000-8000-00000000d1d1 --local --persist-to .cloudflare/state --mode development",
     "db:migrate:remote": "cf d1 migrations apply",
-    "deploy": "cf deploy"
+    "deploy": "cf deploy",
+    "send": "node scripts/send-cve.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "2.0.0-beta.v.3",

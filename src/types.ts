@@ -24,6 +24,8 @@ export interface Cve {
   cvssVersion: string | null;
   exploited: boolean;
   source?: 'CVE Program' | 'NVD';
+  // Sent on request rather than discovered, so it may not be new.
+  requested?: boolean;
 }
 
 export interface Runtime {

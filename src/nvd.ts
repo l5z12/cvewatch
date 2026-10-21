@@ -73,6 +73,40 @@ export function parseCve(value: unknown): Cve | null {
   };
 }
 
+function request(url: URL, apiKey: string | undefined, rt: Runtime, timeoutMs: number): Promise<unknown> {
+  return serviceRequest(
+    'NVD',
+    url,
+    { headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' } },
+    rt,
+    timeoutMs,
+    async (response) => {
+      if (!response.ok) {
+        const delay = retryAfter(response, null, rt.now());
+        await response.body?.cancel();
+        throw new ServiceError(`NVD HTTP ${response.status}`, Math.max(delay, 300_000));
+      }
+      return readJson(response, 12 * 1024 * 1024);
+    },
+  );
+}
+
+// Returns null when NVD has no record of the CVE yet, or has rejected it.
+export async function fetchCve(id: string, apiKey: string | undefined, rt: Runtime): Promise<Cve | null> {
+  const url = new URL(NVD_URL);
+  url.searchParams.set('cveId', id);
+  const body = await request(url, apiKey, rt, 15_000);
+  if (!record(body) || !Array.isArray(body.vulnerabilities) || body.vulnerabilities.length > 1) {
+    throw new ServiceError('Invalid NVD response');
+  }
+  const item: unknown = body.vulnerabilities[0];
+  if (item === undefined) return null;
+  if (!record(item)) throw new ServiceError('Invalid NVD page item');
+  const cve = parseCve(item.cve);
+  if (cve && cve.id !== id) throw new ServiceError('Invalid NVD CVE record');
+  return cve;
+}
+
 export async function fetchPage(
   start: number,
   end: number,
@@ -85,22 +119,8 @@ export async function fetchPage(
   url.searchParams.set('lastModEndDate', new Date(end).toISOString());
   url.searchParams.set('startIndex', String(index));
   url.searchParams.set('resultsPerPage', String(PAGE_SIZE));
-  const body = await serviceRequest(
-    'NVD',
-    url,
-    { headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' } },
-    rt,
-    // Pages usually arrive in 2-12 seconds from Workers, but some stall past 30.
-    60_000,
-    async (response) => {
-      if (!response.ok) {
-        const delay = retryAfter(response, null, rt.now());
-        await response.body?.cancel();
-        throw new ServiceError(`NVD HTTP ${response.status}`, Math.max(delay, 300_000));
-      }
-      return readJson(response, 12 * 1024 * 1024);
-    },
-  );
+  // Pages usually arrive in 2-12 seconds from Workers, but some stall past 30.
+  const body = await request(url, apiKey, rt, 60_000);
   if (
     !record(body) ||
     !Array.isArray(body.vulnerabilities) ||

@@ -1,7 +1,7 @@
 import { enabledChannels, validateSecrets } from './messages';
 import type { BotEnv, Channel } from './types';
 
-type HealthStatus = 'pass' | 'fail';
+type HealthStatus = 'pass' | 'warn' | 'fail';
 
 interface HealthCheck {
   componentId: string;
@@ -18,23 +18,32 @@ interface PollState {
   last_error: string | null;
 }
 
-function pollCheck(componentId: string, state: PollState | null, maxAge: number, now: number): HealthCheck {
+// A backstop source only fails once its data is stale; a single failed poll is a warning.
+function pollCheck(
+  componentId: string,
+  state: PollState | null,
+  maxAge: number,
+  now: number,
+  backstop = false,
+): HealthCheck {
   const age = state?.last_success_at ? now - state.last_success_at : undefined;
-  const healthy = age !== undefined && !state?.last_error && age < maxAge;
+  const fresh = age !== undefined && age < maxAge;
+  const status = !fresh ? 'fail' : !state?.last_error ? 'pass' : backstop ? 'warn' : 'fail';
   return {
     componentId,
     componentType: 'component',
-    status: healthy ? 'pass' : 'fail',
+    status,
     time: new Date(now).toISOString(),
     observedValue: age,
     observedUnit: 'ms',
-    output: healthy
-      ? undefined
-      : state?.last_error
-        ? `The last poll failed: ${state.last_error}`
-        : age === undefined
-          ? 'No successful poll yet.'
-          : 'The last successful poll is stale.',
+    output:
+      status === 'pass'
+        ? undefined
+        : state?.last_error
+          ? `The last poll failed: ${state.last_error}`
+          : age === undefined
+            ? 'No successful poll yet.'
+            : 'The last successful poll is stale.',
   };
 }
 
@@ -45,7 +54,7 @@ function response(
   return Response.json(
     { status, serviceId: 'cvewatch', description: 'CVE publication notifications', ...details },
     {
-      status: status === 'pass' ? 200 : 503,
+      status: status === 'fail' ? 503 : 200,
       headers: { 'Content-Type': 'application/health+json', 'Cache-Control': 'no-store' },
     },
   );
@@ -81,7 +90,7 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
     const time = new Date(now).toISOString();
     const checks: Record<string, HealthCheck[]> = {
       database: [{ componentId: 'DB', componentType: 'datastore', status: 'pass', time }],
-      nvd: [pollCheck('nvd', state, Math.max(30, Number(env.POLL_INTERVAL_MINUTES) * 3) * 60_000, now)],
+      nvd: [pollCheck('nvd', state, Math.max(30, Number(env.POLL_INTERVAL_MINUTES) * 3) * 60_000, now, true)],
       'cve-list': [pollCheck('cve-list', delta, Math.max(120, Number(env.LIVE_POLL_SECONDS) * 3) * 1000, now)],
       'cve-search': [pollCheck('cve-search', live, Math.max(120, Number(env.LIVE_POLL_SECONDS) * 3) * 1000, now)],
     };
@@ -100,8 +109,9 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
         },
       ];
     }
-    const healthy = Object.values(checks).every((entries) => entries.every((check) => check.status === 'pass'));
-    return response(healthy ? 'pass' : 'fail', { checks });
+    const statuses = Object.values(checks).flatMap((entries) => entries.map((check) => check.status));
+    const status = statuses.includes('fail') ? 'fail' : statuses.includes('warn') ? 'warn' : 'pass';
+    return response(status, { checks });
   } catch {
     // Do not expose database exceptions or credentials in a public response.
     return response('fail', { output: 'Configuration or storage is unavailable.' });

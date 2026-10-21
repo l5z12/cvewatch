@@ -415,6 +415,34 @@ describe('formatting and configuration', () => {
       .run();
     expect((await health()).status).toBe(503);
   });
+
+  it('warns about a failed NVD poll until NVD data is stale', async () => {
+    const now = Date.now();
+    await env.DB.prepare(
+      'INSERT INTO poll_state (id, not_before, watermark, last_success_at, last_error) VALUES (1, ?, ?, ?, ?)',
+    )
+      .bind(now, now, now - 60_000, 'NVD request failed: Request timed out')
+      .run();
+    await env.DB.prepare('INSERT INTO live_poll_state (id, watermark, last_success_at) VALUES (1, ?, ?)')
+      .bind(now, now)
+      .run();
+    await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
+    const health = () => worker.fetch(new Request('https://worker.test/api/health/'), botEnv());
+    const response = await health();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: 'warn',
+      checks: { nvd: [{ status: 'warn', output: 'The last poll failed: NVD request failed: Request timed out' }] },
+    });
+    await env.DB.prepare('UPDATE poll_state SET last_success_at = ?')
+      .bind(now - 60 * 60_000)
+      .run();
+    expect((await health()).status).toBe(503);
+    // Live sources still fail on any error.
+    await env.DB.prepare('UPDATE poll_state SET last_success_at = ?, last_error = NULL').bind(now).run();
+    await env.DB.prepare("UPDATE live_poll_state SET last_error = 'CVE Search HTTP 503'").run();
+    expect((await health()).status).toBe(503);
+  });
 });
 
 describe('destination health endpoints', () => {

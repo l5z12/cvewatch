@@ -64,7 +64,7 @@ This starts recurring alarms and sends real messages. Local NVD recovery needs r
 
 ## Monitoring
 
-Open `/health` for a status page. Use `/api/health/` for overall status, or `/api/health/telegram/` and `/api/health/discord/` for each destination. HTTP 200 means healthy; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
+Open `/health` for a status page. Use `/api/health/` for overall status, or `/api/health/telegram/` and `/api/health/discord/` for each destination. HTTP 200 means healthy, with status `warn` if the last NVD recovery poll failed but NVD data is still fresh; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
 
 This product uses data from the NVD API but is not endorsed or certified by the NVD.
 

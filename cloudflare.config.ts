@@ -11,6 +11,8 @@ export default defineConfig(({ mode }) => ({
     compatibilityDate: '2026-10-19',
     compatibilityFlags: ['nodejs_compat'],
     workersDev: true,
+    domains: ['cvewatch.l5z12.dev'],
+    assets: { runWorkerFirst: ['/api/*'] },
     exports: {
       PublicationMonitor: exports.durableObject({ storage: 'sqlite' }),
     },

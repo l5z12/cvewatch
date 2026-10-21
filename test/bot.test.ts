@@ -572,7 +572,19 @@ describe('recent publications from the CVE Program', () => {
     await pollRecent(botEnv(), rt);
     expect(mockFetch).toHaveBeenCalledTimes(2);
     const request = JSON.parse(String(mockFetch.mock.calls[1]![1]?.body));
-    expect(Date.parse(request.pubStartDate)).toBe(NOW - 5 * 60_000);
+    expect(Date.parse(request.pubStartDate)).toBe(NOW - 60 * 60_000);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM cves').first('n')).toBe(1);
+  });
+
+  it('finds publications that the search index lists late', async () => {
+    const { rt, mockFetch, advance } = clock();
+    mockFetch.mockResolvedValueOnce(searchPage([]));
+    await pollRecent(botEnv(), rt);
+    advance(15 * 60_000);
+    mockFetch.mockResolvedValueOnce(searchPage([programRecord()]));
+    await pollRecent(botEnv(), rt);
+    const request = JSON.parse(String(mockFetch.mock.calls[1]![1]?.body));
+    expect(Date.parse(request.pubStartDate)).toBeLessThan(NOW - 1000);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM cves').first('n')).toBe(1);
   });
 
@@ -654,7 +666,7 @@ describe('recent publications from the CVE Program', () => {
     mockFetch.mockResolvedValueOnce(searchPage([]));
     await pollRecent(botEnv(), rt);
     const request = JSON.parse(String(mockFetch.mock.calls[0]![1]?.body));
-    expect(Date.parse(request.pubStartDate)).toBe(NOW - 15 * 60_000);
+    expect(Date.parse(request.pubStartDate)).toBe(NOW - 120 * 60_000);
     expect(request.pageNumber).toBe(1);
   });
 

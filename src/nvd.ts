@@ -90,7 +90,8 @@ export async function fetchPage(
     url,
     { headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' } },
     rt,
-    30_000,
+    // Pages usually arrive in 2-12 seconds from Workers, but some stall past 30.
+    60_000,
     async (response) => {
       if (!response.ok) {
         const delay = retryAfter(response, null, rt.now());

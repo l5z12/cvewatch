@@ -1,8 +1,8 @@
 import { fetchPage } from './nvd';
 import { pollDelta } from './cve-list';
 import { pollRecent } from './cve-search';
-import { enqueueStatements } from './outbox';
-import { enabledChannels, send, validateSecrets } from './messages';
+import { enqueueStatements, scoreStatements } from './outbox';
+import { edit, enabledChannels, send, validateSecrets } from './messages';
 import { processRequests } from './requests';
 import { type BotEnv, type Channel, type Cve, type Runtime, integer, runtime, safeError, ServiceError } from './types';
 
@@ -40,6 +40,8 @@ export async function poll(env: BotEnv, rt: Runtime): Promise<void> {
   // query count bounded even when the source returns a full page.
   await env.DB.batch([
     ...enqueueStatements(env.DB, cves, now, enabledChannels(env)),
+    // Modification windows also return CVEs that have just been scored.
+    ...scoreStatements(env.DB, page.cves),
     complete
       ? env.DB.prepare(
           `UPDATE poll_state SET watermark = ?, window_start = NULL, window_end = NULL,
@@ -58,6 +60,8 @@ interface PendingDelivery {
   cve_id: string;
   payload: string;
   attempts: number;
+  // Set when the alert was sent without a score and is queued again to add it.
+  message_id: string | null;
   published_at: number;
   discovered_at: number;
 }
@@ -81,7 +85,7 @@ export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promi
       }
       if (wait > 0) await rt.sleep(wait);
       const row = await env.DB.prepare(
-        `SELECT d.cve_id, d.attempts, c.payload, c.published_at, c.discovered_at FROM deliveries d
+        `SELECT d.cve_id, d.attempts, d.message_id, c.payload, c.published_at, c.discovered_at FROM deliveries d
         JOIN cves c ON c.id = d.cve_id WHERE d.channel = ? AND d.sent_at IS NULL
         AND d.next_attempt_at <= ? ORDER BY c.published_at DESC, d.next_attempt_at, d.cve_id LIMIT 1`,
       )
@@ -91,8 +95,12 @@ export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promi
         blocked.add(channel);
         continue;
       }
+      let messageId = row.message_id;
+      let edited = false;
       try {
-        await send(channel, JSON.parse(row.payload) as Cve, env, rt);
+        const cve = JSON.parse(row.payload) as Cve;
+        if (messageId === null) messageId = await send(channel, cve, env, rt);
+        else edited = await edit(channel, cve, messageId, env, rt);
       } catch (error) {
         const backoff = Math.min(6 * HOUR, MINUTE * 2 ** Math.min(row.attempts, 12));
         const retryAt = rt.now() + Math.max(backoff, error instanceof ServiceError ? error.retryAfterMs : MINUTE);
@@ -113,20 +121,25 @@ export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promi
       // accepting a message and this write can still cause an at-least-once retry.
       await env.DB.batch([
         env.DB.prepare(
-          `UPDATE deliveries SET sent_at = ?, attempts = attempts + 1, last_error = NULL
+          `UPDATE deliveries SET sent_at = ?, attempts = attempts + 1, last_error = NULL, message_id = ?
           WHERE cve_id = ? AND channel = ?`,
-        ).bind(rt.now(), row.cve_id, channel),
+        ).bind(rt.now(), messageId, row.cve_id, channel),
         env.DB.prepare('UPDATE channel_state SET next_send_at = ? WHERE channel = ?').bind(rt.now() + 1100, channel),
       ]);
       console.log(
-        JSON.stringify({
-          event: 'delivered',
-          channel,
-          cve: row.cve_id,
-          publicationToDiscoveryMs: row.discovered_at - row.published_at,
-          publicationToDeliveryMs: rt.now() - row.published_at,
-          queueDelayMs: rt.now() - row.discovered_at,
-        }),
+        JSON.stringify(
+          row.message_id === null
+            ? {
+                event: 'delivered',
+                channel,
+                cve: row.cve_id,
+                publicationToDiscoveryMs: row.discovered_at - row.published_at,
+                publicationToDeliveryMs: rt.now() - row.published_at,
+                queueDelayMs: rt.now() - row.discovered_at,
+              }
+            : // A skipped edit leaves the original alert unscored.
+              { event: edited ? 'score_added' : 'score_edit_skipped', channel, cve: row.cve_id },
+        ),
       );
     }
   }

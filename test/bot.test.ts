@@ -853,7 +853,7 @@ describe('requested CVEs', () => {
   it('resends an already delivered CVE to both destinations on the next live run', async () => {
     const { rt, mockFetch } = clock();
     await seed([{ ...cve(), id: ID, published: PUBLISHED }]);
-    await env.DB.prepare('UPDATE deliveries SET sent_at = ?, attempts = 1')
+    await env.DB.prepare("UPDATE deliveries SET sent_at = ?, attempts = 1, message_id = '7'")
       .bind(NOW - 60_000)
       .run();
     await request();
@@ -872,6 +872,9 @@ describe('requested CVEs', () => {
     expect(mockFetch.mock.calls.every(([url]) => !String(url).includes('nist.gov'))).toBe(true);
     const sends = mockFetch.mock.calls.filter(([url]) => /telegram|discord/.test(String(url)));
     expect(sends).toHaveLength(2);
+    // A resend posts a new message rather than editing the earlier alert.
+    expect(String(sends[0]![0])).toMatch(/\/sendMessage$/);
+    expect(sends.map(([, init]) => init?.method)).toEqual(['POST', 'POST']);
     expect(JSON.parse(String(sends[0]![1]?.body)).text).toMatch(/^CVE-2021-44228\nCRITICAL · 10\.0\/10/);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at = ?').bind(NOW).first('n')).toBe(2);
     expect(await requestRow()).toBeNull();
@@ -971,6 +974,147 @@ describe('requested CVEs', () => {
     await env.DB.prepare('UPDATE deliveries SET sent_at = ?').bind(NOW).run();
     mockFetch.mockResolvedValueOnce(searchPage([programRecord(id)]));
     await pollRecent(botEnv(), rt);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
+  });
+});
+
+describe('scores published later', () => {
+  const ID = 'CVE-2026-50000';
+  const MESSAGE = '1300000000000000001';
+  const nvdScored = (baseScore = 7.5) =>
+    rawCve(ID, {
+      metrics: {
+        cvssMetricV31: [{ type: 'Primary', cvssData: { version: '3.1', baseScore, baseSeverity: 'HIGH' } }],
+      },
+    });
+  const messaging = async (url: RequestInfo | URL) =>
+    String(url).includes('telegram')
+      ? Response.json({ ok: true, result: { message_id: 42 } })
+      : Response.json({ id: MESSAGE });
+  const sends = (mockFetch: ReturnType<typeof clock>['mockFetch']) =>
+    mockFetch.mock.calls.filter(([url]) => /telegram|discord/.test(String(url)));
+  const deliveries = async () =>
+    (
+      await env.DB.prepare(
+        'SELECT cve_id, channel, sent_at, message_id, last_error FROM deliveries ORDER BY cve_id, channel',
+      ).all()
+    ).results;
+
+  it('edits sent alerts in place once NVD scores them, and only once', async () => {
+    const { rt, mockFetch, advance } = clock();
+    mockFetch.mockImplementation(async (url) =>
+      String(url).includes('search.cve.org') ? searchPage([programRecord(ID)]) : messaging(url),
+    );
+    await pollRecent(botEnv(), rt);
+    await deliver(botEnv(), rt, NOW + 45_000);
+    expect(await deliveries()).toMatchObject([
+      { channel: 'discord', message_id: MESSAGE },
+      { channel: 'telegram', message_id: '42' },
+    ]);
+
+    advance(5 * 60_000);
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url) =>
+      String(url).includes('nist.gov') ? page([nvdScored()]) : messaging(url),
+    );
+    await run(botEnv(), rt);
+    expect(sends(mockFetch)).toHaveLength(2);
+    const [telegram, discord] = sends(mockFetch);
+    expect(String(telegram![0])).toMatch(/\/editMessageText$/);
+    const edited = JSON.parse(String(telegram![1]?.body));
+    expect(edited).toMatchObject({ chat_id: '@test_channel', message_id: 42 });
+    expect(edited.text).toMatch(/^New CVE: CVE-2026-50000\nHIGH · 7\.5\/10 \(CVSS 3\.1\)\n.*\nSource: CVE Program\n/);
+    expect(discord![1]?.method).toBe('PATCH');
+    expect(String(discord![0])).toBe(`https://discord.com/api/webhooks/123456789/test-token/messages/${MESSAGE}`);
+    const patch = JSON.parse(String(discord![1]?.body));
+    expect(patch).not.toHaveProperty('username');
+    expect(patch.embeds[0].description).toContain('HIGH · 7.5/10 (CVSS 3.1)');
+    expect(await deliveries()).toMatchObject([
+      { channel: 'discord', message_id: MESSAGE, last_error: null },
+      { channel: 'telegram', message_id: '42', last_error: null },
+    ]);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
+
+    // Another source's different score does not edit the alert again.
+    advance(5 * 60_000);
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url) =>
+      String(url).includes('nist.gov') ? page([nvdScored(9.8)]) : messaging(url),
+    );
+    await run(botEnv(), rt);
+    expect(sends(mockFetch)).toHaveLength(0);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ score: 7.5, severity: 'HIGH', cvssVersion: '3.1', source: 'CVE Program' });
+  });
+
+  it('sends the score with unsent alerts and leaves alerts sent without a message ID', async () => {
+    const { rt, mockFetch } = clock();
+    await seed([{ ...cve(), id: ID }]);
+    await env.DB.prepare("UPDATE deliveries SET sent_at = ? WHERE channel = 'telegram'")
+      .bind(NOW - 60_000)
+      .run();
+    const record = programRecord(ID);
+    const metrics = [{ cvssV4_0: { version: '4.0', baseScore: 9.3, baseSeverity: 'CRITICAL' } }];
+    mockFetch.mockImplementation(async (url) =>
+      String(url).includes('search.cve.org')
+        ? searchPage([{ ...record, containers: { cna: { ...record.containers.cna, metrics } } }])
+        : messaging(url),
+    );
+    await pollRecent(botEnv(), rt);
+    await deliver(botEnv(), rt, NOW + 45_000);
+    expect(sends(mockFetch)).toHaveLength(1);
+    const [url, init] = sends(mockFetch)[0]!;
+    expect(new URL(String(url)).searchParams.get('wait')).toBe('true');
+    expect(init?.method).toBe('POST');
+    const embed = JSON.parse(String(init?.body)).embeds[0];
+    expect(embed.color).toBe(0xdc2626);
+    expect(embed.description).toContain('CRITICAL · 9.3/10 (CVSS 4.0)');
+    expect(await deliveries()).toMatchObject([
+      { channel: 'discord', message_id: MESSAGE },
+      { channel: 'telegram', sent_at: NOW - 60_000, message_id: null },
+    ]);
+  });
+
+  it('drops edits that cannot succeed without blocking new alerts, and retries the rest', async () => {
+    const { rt, mockFetch, advance } = clock();
+    const older = 'CVE-2026-50001';
+    await seed([
+      { ...cve(), id: ID },
+      { ...cve(), id: older, published: '2026-10-21T05:00:00.000Z' },
+    ]);
+    await env.DB.prepare("UPDATE deliveries SET sent_at = ?, message_id = '42' WHERE cve_id = ?")
+      .bind(NOW - 60_000, ID)
+      .run();
+    mockFetch.mockResolvedValueOnce(page([nvdScored()]));
+    await poll(botEnv(), rt);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(4);
+
+    mockFetch.mockImplementation(async (url) =>
+      String(url).includes('editMessageText')
+        ? Response.json(
+            { ok: false, error_code: 400, description: 'Bad Request: message to edit not found' },
+            { status: 400 },
+          )
+        : String(url).includes('/messages/')
+          ? new Response('Unavailable', { status: 503 })
+          : messaging(url),
+    );
+    await deliver(botEnv(), rt, NOW + 45_000);
+    expect(await deliveries()).toEqual([
+      { cve_id: ID, channel: 'discord', sent_at: null, message_id: '42', last_error: 'discord HTTP/API 503' },
+      { cve_id: ID, channel: 'telegram', sent_at: NOW, message_id: '42', last_error: null },
+      { cve_id: older, channel: 'discord', sent_at: null, message_id: null, last_error: null },
+      { cve_id: older, channel: 'telegram', sent_at: NOW + 1100, message_id: '42', last_error: null },
+    ]);
+
+    advance(60_000);
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(messaging);
+    await deliver(botEnv(), rt, rt.now() + 45_000);
+    expect(sends(mockFetch).map(([url, init]) => [init?.method, new URL(String(url)).pathname])).toEqual([
+      ['PATCH', '/api/webhooks/123456789/test-token/messages/42'],
+      ['POST', '/api/webhooks/123456789/test-token'],
+    ]);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
   });
 });

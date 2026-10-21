@@ -63,26 +63,29 @@ export function validateSecrets(env: BotEnv): void {
   }
 }
 
-export async function send(channel: Channel, cve: Cve, env: BotEnv, rt: Runtime): Promise<void> {
+function content(channel: Channel, cve: Cve, env: BotEnv): Record<string, unknown> {
   const text = message(cve);
-  const url =
-    channel === 'telegram'
-      ? new URL(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`)
-      : new URL(env.DISCORD_WEBHOOK_URL!);
-  if (channel === 'discord') url.searchParams.set('wait', 'true');
-  const payload =
-    channel === 'telegram'
-      ? { chat_id: env.TELEGRAM_CHAT_ID, text, link_preview_options: { is_disabled: true } }
-      : {
-          username: 'CVE Watch',
-          avatar_url: 'https://cvewatch.l5z12.dev/icon.png',
-          allowed_mentions: { parse: [] },
-          embeds: [{ description: text, color: cve.severity === 'CRITICAL' ? 0xdc2626 : 0x2563eb }],
-        };
-  await serviceRequest(
+  return channel === 'telegram'
+    ? { chat_id: env.TELEGRAM_CHAT_ID, text, link_preview_options: { is_disabled: true } }
+    : {
+        allowed_mentions: { parse: [] },
+        embeds: [{ description: text, color: cve.severity === 'CRITICAL' ? 0xdc2626 : 0x2563eb }],
+      };
+}
+
+// Returns the confirmed API response, or null for an edit that retrying cannot fix.
+async function request(
+  channel: Channel,
+  url: URL,
+  method: 'POST' | 'PATCH',
+  payload: Record<string, unknown>,
+  editing: boolean,
+  rt: Runtime,
+): Promise<Record<string, unknown> | null> {
+  return serviceRequest(
     channel,
     url,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+    { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
     rt,
     10_000,
     async (response) => {
@@ -90,11 +93,49 @@ export async function send(channel: Channel, cve: Cve, env: BotEnv, rt: Runtime)
         if (response.ok && response.status !== 204) throw error;
         return null;
       });
-      const valid = record(body) && (channel === 'telegram' ? body.ok === true : typeof body.id === 'string');
-      if (!response.ok || !valid) {
-        const code = record(body) && typeof body.error_code === 'number' ? body.error_code : response.status;
-        throw new ServiceError(`${channel} HTTP/API ${code}`, retryAfter(response, body, rt.now()));
+      if (response.ok && record(body) && (channel === 'telegram' ? body.ok === true : typeof body.id === 'string')) {
+        return body;
       }
+      const code = record(body) && typeof body.error_code === 'number' ? body.error_code : response.status;
+      // The message was deleted, the destination has changed since it was sent, or
+      // (on Telegram) the message already shows this text.
+      if (editing && code >= 400 && code < 500 && code !== 429) return null;
+      throw new ServiceError(`${channel} HTTP/API ${code}`, retryAfter(response, body, rt.now()));
     },
   );
+}
+
+// Returns the sent message's ID for later edits, or null if the API returned none.
+export async function send(channel: Channel, cve: Cve, env: BotEnv, rt: Runtime): Promise<string | null> {
+  const url =
+    channel === 'telegram'
+      ? new URL(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`)
+      : new URL(env.DISCORD_WEBHOOK_URL!);
+  if (channel === 'discord') url.searchParams.set('wait', 'true');
+  const payload =
+    channel === 'telegram'
+      ? content(channel, cve, env)
+      : { username: 'CVE Watch', avatar_url: 'https://cvewatch.l5z12.dev/icon.png', ...content(channel, cve, env) };
+  const body = await request(channel, url, 'POST', payload, false, rt);
+  if (channel === 'telegram') {
+    const id = record(body?.result) ? body.result.message_id : undefined;
+    return Number.isSafeInteger(id) && (id as number) > 0 ? String(id) : null;
+  }
+  // The ID becomes part of the edit URL.
+  return typeof body?.id === 'string' && /^\d{1,20}$/.test(body.id) ? body.id : null;
+}
+
+// Replaces a sent alert's text. Returns false if the message can no longer be edited.
+export async function edit(channel: Channel, cve: Cve, messageId: string, env: BotEnv, rt: Runtime): Promise<boolean> {
+  const url =
+    channel === 'telegram'
+      ? new URL(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`)
+      : new URL(env.DISCORD_WEBHOOK_URL!);
+  // Keeps the webhook's thread_id parameter, which Discord needs to find thread messages.
+  if (channel === 'discord') url.pathname += `/messages/${messageId}`;
+  const payload =
+    channel === 'telegram'
+      ? { ...content(channel, cve, env), message_id: Number(messageId) }
+      : content(channel, cve, env);
+  return (await request(channel, url, channel === 'telegram' ? 'POST' : 'PATCH', payload, true, rt)) !== null;
 }

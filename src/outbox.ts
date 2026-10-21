@@ -26,8 +26,45 @@ export function enqueueStatements(
   ];
 }
 
-// Requested CVEs are resent even if already delivered, with a refreshed payload.
-// Commit these in the same batch that removes the request.
+// Adds a newly published score to stored CVEs that were queued without one. Sent
+// alerts are queued again to be edited; unsent ones go out with the score. A stored
+// score is never replaced, so sources that disagree cannot keep editing an alert.
+export function scoreStatements(db: D1Database, cves: Cve[]): D1PreparedStatement[] {
+  const scored = cves.filter((cve) => cve.score !== null);
+  if (scored.length === 0) return [];
+  // A merge patch removes null members, so set only the fields that have values.
+  const rows = JSON.stringify(
+    scored.map((cve) => ({
+      id: cve.id,
+      patch: {
+        severity: cve.severity,
+        score: cve.score,
+        ...(cve.cvssVersion ? { cvssVersion: cve.cvssVersion } : {}),
+        ...(cve.exploited ? { exploited: true } : {}),
+      },
+    })),
+  );
+  return [
+    // Runs first: it finds the alerts to edit by their missing score.
+    db
+      .prepare(
+        `UPDATE deliveries SET sent_at = NULL, attempts = 0, next_attempt_at = 0, last_error = NULL
+      WHERE sent_at IS NOT NULL AND message_id IS NOT NULL AND cve_id IN (
+        SELECT c.id FROM cves c JOIN json_each(?) j ON c.id = json_extract(j.value, '$.id')
+        WHERE json_extract(c.payload, '$.score') IS NULL)`,
+      )
+      .bind(rows),
+    db
+      .prepare(
+        `UPDATE cves SET payload = json_patch(payload, json_extract(j.value, '$.patch')) FROM json_each(?) j
+      WHERE cves.id = json_extract(j.value, '$.id') AND json_extract(cves.payload, '$.score') IS NULL`,
+      )
+      .bind(rows),
+  ];
+}
+
+// Requested CVEs are resent even if already delivered, with a refreshed payload, as
+// a new message. Commit these in the same batch that removes the request.
 export function resendStatements(
   db: D1Database,
   cve: Cve,
@@ -45,7 +82,8 @@ export function resendStatements(
       .prepare(
         `INSERT INTO deliveries (cve_id, channel)
       SELECT ?, channel FROM channel_state WHERE channel IN (SELECT value FROM json_each(?))
-      ON CONFLICT(cve_id, channel) DO UPDATE SET attempts = 0, next_attempt_at = 0, sent_at = NULL, last_error = NULL`,
+      ON CONFLICT(cve_id, channel) DO UPDATE SET attempts = 0, next_attempt_at = 0, sent_at = NULL, last_error = NULL,
+        message_id = NULL`,
       )
       .bind(cve.id, JSON.stringify(channels)),
   ];

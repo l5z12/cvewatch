@@ -345,12 +345,17 @@ describe('formatting and configuration', () => {
   });
 
   it('has no public endpoint that can trigger notifications', async () => {
-    for (const path of ['/run', '/health', '/health/telegram', '/health/discord']) {
+    for (const path of ['/run', '/api/health', '/api/health/telegram', '/api/health/discord']) {
       const response = await worker.fetch(new Request(`https://worker.test${path}`, { method: 'POST' }), botEnv());
       expect(response.status).toBe(404);
+      expect(
+        (await worker.fetch(new Request(`https://worker.test${path}/`, { method: 'POST' }), botEnv())).status,
+      ).toBe(404);
     }
-    expect((await worker.fetch(new Request('https://worker.test/health/slack'), botEnv())).status).toBe(404);
-    expect((await worker.fetch(new Request('https://worker.test/health'), botEnv())).status).toBe(503);
+    for (const path of ['/api/health/slack', '/health', '/health/telegram', '/health/discord']) {
+      expect((await worker.fetch(new Request(`https://worker.test${path}`), botEnv())).status).toBe(404);
+    }
+    expect((await worker.fetch(new Request('https://worker.test/api/health/'), botEnv())).status).toBe(503);
   });
 
   it('reports degraded health when a destination is failing or polling is stale', async () => {
@@ -362,7 +367,7 @@ describe('formatting and configuration', () => {
     await env.DB.prepare('INSERT INTO live_poll_state (id, watermark, last_success_at) VALUES (1, ?, ?)')
       .bind(now, now)
       .run();
-    const health = () => worker.fetch(new Request('https://worker.test/health'), botEnv());
+    const health = () => worker.fetch(new Request('https://worker.test/api/health/'), botEnv());
     expect((await health()).status).toBe(200);
     await env.DB.prepare("UPDATE deliveries SET last_error = 'discord HTTP/API 403' WHERE channel = 'discord'").run();
     expect((await health()).status).toBe(503);
@@ -396,7 +401,7 @@ describe('destination health endpoints', () => {
       .bind(`${other} HTTP/API 403`, other)
       .run();
 
-    const response = await health(`/health/${channel}`);
+    const response = await health(`/api/health/${channel}/`);
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('application/health+json');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
@@ -411,12 +416,12 @@ describe('destination health endpoints', () => {
       },
     });
     expect(body).not.toHaveProperty(`checks.${other}`);
-    expect((await health('/health')).status).toBe(503);
+    expect((await health('/api/health')).status).toBe(503);
 
     await env.DB.prepare('UPDATE deliveries SET last_error = ? WHERE channel = ?')
       .bind(`${channel} HTTP/API 403`, channel)
       .run();
-    const failed = await health(`/health/${channel}`);
+    const failed = await health(`/api/health/${channel}`);
     expect(failed.status).toBe(503);
     expect(await failed.json()).toMatchObject({
       status: 'fail',
@@ -431,7 +436,7 @@ describe('destination health endpoints', () => {
       .bind(Date.now() - 60 * 60_000)
       .run();
     for (const channel of ['telegram', 'discord']) {
-      expect((await health(`/health/${channel}`)).status).toBe(503);
+      expect((await health(`/api/health/${channel}/`)).status).toBe(503);
     }
   });
 
@@ -442,17 +447,17 @@ describe('destination health endpoints', () => {
         ...botEnv(),
         ...(channel === 'telegram' ? { TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' } : { DISCORD_WEBHOOK_URL: '' }),
       };
-      const response = await health(`/health/${channel}`, config);
+      const response = await health(`/api/health/${channel}/`, config);
       expect(response.status).toBe(503);
       expect(await response.json()).toMatchObject({ status: 'fail', output: `${channel} is not configured.` });
-      expect((await health('/health', config)).status).toBe(200);
-      expect((await health(`/health/${channel === 'telegram' ? 'discord' : 'telegram'}`, config)).status).toBe(200);
+      expect((await health('/api/health', config)).status).toBe(200);
+      expect((await health(`/api/health/${channel === 'telegram' ? 'discord' : 'telegram'}`, config)).status).toBe(200);
     },
   );
 
   it('fails both endpoints when shared configuration prevents polling', async () => {
     for (const channel of ['telegram', 'discord']) {
-      const response = await health(`/health/${channel}`, { ...botEnv(), TELEGRAM_BOT_TOKEN: undefined });
+      const response = await health(`/api/health/${channel}/`, { ...botEnv(), TELEGRAM_BOT_TOKEN: undefined });
       expect(response.status).toBe(503);
       expect(await response.json()).toMatchObject({
         status: 'fail',

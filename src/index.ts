@@ -17,11 +17,14 @@ export default {
   async fetch(request, env): Promise<Response> {
     if (request.method === 'GET') {
       switch (new URL(request.url).pathname) {
-        case '/health':
+        case '/api/health':
+        case '/api/health/':
           return health(env);
-        case '/health/telegram':
+        case '/api/health/telegram':
+        case '/api/health/telegram/':
           return health(env, 'telegram');
-        case '/health/discord':
+        case '/api/health/discord':
+        case '/api/health/discord/':
           return health(env, 'discord');
       }
     }

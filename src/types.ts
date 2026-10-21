@@ -60,8 +60,27 @@ export class ServiceError extends Error {
 }
 
 // Never log fetch error text or remote response bodies: they can contain tokens/URLs.
+export function errorDetails(error: unknown): { errorType: string; causeCode?: string } {
+  const names = ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'TimeoutError', 'AbortError'];
+  const errorType =
+    error instanceof ServiceError
+      ? 'ServiceError'
+      : error instanceof Error && names.includes(error.name)
+        ? error.name
+        : 'UnknownError';
+  const cause = error instanceof Error && record(error.cause) ? error.cause : undefined;
+  const codes = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'];
+  const causeCode = typeof cause?.code === 'string' && codes.includes(cause.code) ? cause.code : undefined;
+  return { errorType, causeCode };
+}
+
 export function safeError(error: unknown): string {
-  return error instanceof ServiceError ? error.message : 'Request or processing failed';
+  if (error instanceof ServiceError) return error.message;
+  const { errorType, causeCode } = errorDetails(error);
+  if (errorType === 'TimeoutError') return 'Request timed out';
+  if (errorType === 'AbortError') return 'Request aborted';
+  if (errorType === 'SyntaxError') return 'Invalid JSON response';
+  return `Request or processing failed (${errorType}${causeCode ? `, ${causeCode}` : ''})`;
 }
 
 export async function readJson(response: Response, limit: number): Promise<unknown> {

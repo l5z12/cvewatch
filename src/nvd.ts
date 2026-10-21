@@ -1,4 +1,5 @@
 import { type Cve, type Runtime, record, readJson, retryAfter, ServiceError } from './types';
+import { serviceRequest } from './request';
 
 export const PAGE_SIZE = 200;
 export const NVD_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
@@ -82,17 +83,21 @@ export async function fetchPage(
   url.searchParams.set('lastModEndDate', new Date(end).toISOString());
   url.searchParams.set('startIndex', String(index));
   url.searchParams.set('resultsPerPage', String(PAGE_SIZE));
-  const response = await rt.fetch(url, {
-    headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' },
-    signal: AbortSignal.timeout(15_000),
-    redirect: 'error',
-  });
-  if (!response.ok) {
-    const delay = retryAfter(response, null, rt.now());
-    await response.body?.cancel();
-    throw new ServiceError(`NVD HTTP ${response.status}`, Math.max(delay, 300_000));
-  }
-  const body = await readJson(response, 12 * 1024 * 1024);
+  const body = await serviceRequest(
+    'NVD',
+    url,
+    { headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' } },
+    rt,
+    15_000,
+    async (response) => {
+      if (!response.ok) {
+        const delay = retryAfter(response, null, rt.now());
+        await response.body?.cancel();
+        throw new ServiceError(`NVD HTTP ${response.status}`, Math.max(delay, 300_000));
+      }
+      return readJson(response, 12 * 1024 * 1024);
+    },
+  );
   if (
     !record(body) ||
     !Array.isArray(body.vulnerabilities) ||

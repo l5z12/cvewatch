@@ -1,4 +1,5 @@
 import { type BotEnv, type Channel, type Cve, type Runtime, record, readJson, retryAfter, ServiceError } from './types';
+import { serviceRequest } from './request';
 
 function clip(text: string, length: number): string {
   const chars = Array.from(text);
@@ -78,17 +79,22 @@ export async function send(channel: Channel, cve: Cve, env: BotEnv, rt: Runtime)
           allowed_mentions: { parse: [] },
           embeds: [{ description: text, color: cve.severity === 'CRITICAL' ? 0xdc2626 : 0x2563eb }],
         };
-  const response = await rt.fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(10_000),
-    redirect: 'error',
-  });
-  const body = await readJson(response, 128 * 1024).catch(() => null);
-  const valid = record(body) && (channel === 'telegram' ? body.ok === true : typeof body.id === 'string');
-  if (!response.ok || !valid) {
-    const code = record(body) && typeof body.error_code === 'number' ? body.error_code : response.status;
-    throw new ServiceError(`${channel} HTTP/API ${code}`, retryAfter(response, body, rt.now()));
-  }
+  await serviceRequest(
+    channel,
+    url,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+    rt,
+    10_000,
+    async (response) => {
+      const body = await readJson(response, 128 * 1024).catch((error) => {
+        if (response.ok && response.status !== 204) throw error;
+        return null;
+      });
+      const valid = record(body) && (channel === 'telegram' ? body.ok === true : typeof body.id === 'string');
+      if (!response.ok || !valid) {
+        const code = record(body) && typeof body.error_code === 'number' ? body.error_code : response.status;
+        throw new ServiceError(`${channel} HTTP/API ${code}`, retryAfter(response, body, rt.now()));
+      }
+    },
+  );
 }

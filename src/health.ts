@@ -30,10 +30,10 @@ function pollCheck(componentId: string, state: PollState | null, maxAge: number,
     observedUnit: 'ms',
     output: healthy
       ? undefined
-      : age === undefined
-        ? 'No successful poll yet.'
-        : state?.last_error
-          ? 'The last poll failed.'
+      : state?.last_error
+        ? `The last poll failed: ${state.last_error}`
+        : age === undefined
+          ? 'No successful poll yet.'
           : 'The last successful poll is stale.',
   };
 }

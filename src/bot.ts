@@ -43,12 +43,13 @@ export async function poll(env: BotEnv, rt: Runtime): Promise<void> {
           `UPDATE poll_state SET watermark = ?, window_start = NULL, window_end = NULL,
           page_index = 0, next_poll_at = ?, last_success_at = ?, last_error = NULL WHERE id = 1`,
         ).bind(end, end < now - 2 * MINUTE ? now + MINUTE : now + interval, now)
-      : env.DB.prepare(`UPDATE poll_state SET page_index = ?, next_poll_at = ?, last_error = NULL WHERE id = 1`).bind(
-          nextIndex,
-          now + MINUTE,
-        ),
+      : env.DB.prepare(
+          `UPDATE poll_state SET page_index = ?, next_poll_at = ?, last_success_at = ?, last_error = NULL WHERE id = 1`,
+        ).bind(nextIndex, now + MINUTE, now),
   ]);
-  console.log(JSON.stringify({ event: 'nvd_page', records: page.count, eligible: cves.length, complete, nextIndex }));
+  console.log(
+    JSON.stringify({ event: 'nvd_page', records: page.count, eligible: cves.length, complete, nextIndex, start, end }),
+  );
 }
 
 interface PendingDelivery {
@@ -163,7 +164,9 @@ export async function run(env: BotEnv, rt: Runtime = runtime): Promise<void> {
       await env.DB.prepare('UPDATE poll_state SET next_poll_at = ?, last_error = ? WHERE id = 1')
         .bind(nextPoll, safeError(error))
         .run();
-      console.error(JSON.stringify({ event: 'poll_failed', error: safeError(error) }));
+      console.error(
+        JSON.stringify({ event: 'poll_failed', error: safeError(error), nextPoll, elapsedMs: rt.now() - now }),
+      );
     }
     await deliver(env, rt, now + 45_000);
   });
@@ -187,7 +190,15 @@ export async function runLive(env: BotEnv, rt: Runtime = runtime): Promise<void>
       )
         .bind(nextPoll, safeError(error))
         .run();
-      console.error(JSON.stringify({ event: 'cve_search_failed', error: safeError(error), nextPoll }));
+      console.error(
+        JSON.stringify({
+          event: 'cve_search_failed',
+          error: safeError(error),
+          nextPoll,
+          failures: failures + 1,
+          elapsedMs: rt.now() - now,
+        }),
+      );
     }
     await deliver(env, rt, now + 45_000);
   });

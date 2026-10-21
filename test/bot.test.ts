@@ -36,7 +36,12 @@ function clock() {
   let now = NOW;
   const mockFetch = vi.fn<typeof fetch>();
   const rt: Runtime = {
-    fetch: mockFetch,
+    fetch: (input, init) => {
+      // Exercise Workers' native option validation before the mocked network.
+      // In particular, Workers rejects redirect: 'error' before making a request.
+      new Request(input, init);
+      return mockFetch(input, init);
+    },
     now: () => now,
     sleep: async (ms) => {
       now += ms;
@@ -129,6 +134,7 @@ describe('feed ingestion', () => {
     await poll(botEnv(), rt);
     const before = await env.DB.prepare('SELECT * FROM poll_state').first();
     expect(before?.page_index).toBe(200);
+    expect(before?.last_success_at).toBe(NOW);
     advance(60_000);
     mockFetch.mockResolvedValueOnce(new Response('Unavailable', { status: 503 }));
     await expect(poll(botEnv(), rt)).rejects.toThrow('NVD HTTP 503');
@@ -344,6 +350,36 @@ describe('formatting and configuration', () => {
     await expect(readJson(new Response('x'.repeat(1024)), 64)).rejects.toBeInstanceOf(ServiceError);
   });
 
+  it('reports the failure reason before the first successful poll', async () => {
+    const { rt, mockFetch } = clock();
+    mockFetch.mockRejectedValue(new DOMException('secret timeout detail', 'TimeoutError'));
+    await runLive(botEnv(), rt);
+    const response = await worker.fetch(new Request('https://worker.test/api/health/telegram'), botEnv());
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      checks: { 'cve-search': [{ output: 'The last poll failed: CVE Search request failed: Request timed out' }] },
+    });
+    expect(JSON.stringify(body)).not.toContain('secret');
+  });
+
+  it.each(['nvd', 'cve-search', 'telegram', 'discord'] as const)(
+    'rejects %s redirects without forwarding credentials',
+    async (service) => {
+      const { rt, mockFetch } = clock();
+      mockFetch.mockResolvedValue(new Response(null, { status: 302, headers: { Location: 'https://example.com/' } }));
+      const request =
+        service === 'nvd'
+          ? fetchPage(NOW - 1000, NOW, 0, 'test-api-key', rt)
+          : service === 'cve-search'
+            ? fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)
+            : send(service, cve(), botEnv(), rt);
+      await expect(request).rejects.toThrow('302');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch.mock.calls[0]![1]?.redirect).toBe('manual');
+    },
+  );
+
   it('has no public endpoint that can trigger notifications', async () => {
     for (const path of ['/run', '/api/health', '/api/health/telegram', '/api/health/discord']) {
       const response = await worker.fetch(new Request(`https://worker.test${path}`, { method: 'POST' }), botEnv());
@@ -546,6 +582,7 @@ describe('recent publications from the CVE Program', () => {
     await pollRecent(botEnv(), rt);
     const before = await env.DB.prepare('SELECT * FROM live_poll_state').first();
     expect(before?.page_number).toBe(2);
+    expect(before?.last_success_at).toBe(NOW);
     advance(15_000);
     mockFetch.mockResolvedValueOnce(searchPage([programRecord('CVE-2026-60200')], 2, 201));
     await pollRecent(botEnv(), rt);

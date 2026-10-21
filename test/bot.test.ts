@@ -5,7 +5,7 @@ import { deliver, poll, run, runLive } from '../src/bot';
 import { fetchRecentPage, parseCveRecord, pollRecent } from '../src/cve-search';
 import worker from '../src/index';
 import { message, send, validateSecrets } from '../src/messages';
-import { fetchPage, parseCve } from '../src/nvd';
+import { fetchPage, PAGE_SIZE, parseCve } from '../src/nvd';
 import { type BotEnv, type Cve, type Runtime, readJson, ServiceError } from '../src/types';
 
 const NOW = Date.parse('2026-10-22T06:00:00Z');
@@ -129,23 +129,23 @@ describe('feed ingestion', () => {
 
   it('resumes pagination after a failed page without advancing the watermark', async () => {
     const { rt, mockFetch, advance } = clock();
-    const items = Array.from({ length: 200 }, (_, i) => rawCve(`CVE-2026-${20000 + i}`));
-    mockFetch.mockResolvedValueOnce(page(items, 0, 201));
+    const items = Array.from({ length: PAGE_SIZE }, (_, i) => rawCve(`CVE-2026-${20000 + i}`));
+    mockFetch.mockResolvedValueOnce(page(items, 0, PAGE_SIZE + 1));
     await poll(botEnv(), rt);
     const before = await env.DB.prepare('SELECT * FROM poll_state').first();
-    expect(before?.page_index).toBe(200);
+    expect(before?.page_index).toBe(PAGE_SIZE);
     expect(before?.last_success_at).toBe(NOW);
     advance(60_000);
     mockFetch.mockResolvedValueOnce(new Response('Unavailable', { status: 503 }));
     await expect(poll(botEnv(), rt)).rejects.toThrow('NVD HTTP 503');
     expect(await env.DB.prepare('SELECT watermark FROM poll_state').first('watermark')).toBe(before?.watermark);
-    mockFetch.mockResolvedValueOnce(page([rawCve('CVE-2026-99999')], 200, 201));
+    mockFetch.mockResolvedValueOnce(page([rawCve('CVE-2026-99999')], PAGE_SIZE, PAGE_SIZE + 1));
     await poll(botEnv(), rt);
     const after = await env.DB.prepare('SELECT * FROM poll_state').first();
     expect(after?.page_index).toBe(0);
     expect(after?.window_end).toBeNull();
     expect(after?.watermark).toBe(before?.window_end);
-    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries').first('n')).toBe(402);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries').first('n')).toBe(2 * (PAGE_SIZE + 1));
     const urls = mockFetch.mock.calls.map(([url]) => new URL(String(url)));
     expect(urls[0]!.searchParams.get('lastModEndDate')).toBe(urls[2]!.searchParams.get('lastModEndDate'));
   });
@@ -517,7 +517,8 @@ const searchPage = (records: unknown[], pageNumber = 1, totalResults = records.l
     warnings: [],
     records,
     pagination: {
-      page: pageNumber,
+      // Matches the live API, which reports page 0 when nothing matches.
+      page: totalResults === 0 ? 0 : pageNumber,
       pageSize: 200,
       resultsReturned: records.length,
       totalResults,
@@ -619,6 +620,12 @@ describe('recent publications from the CVE Program', () => {
     await expect(fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)).rejects.toThrow('result window exceeded');
     await expect(fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)).rejects.toThrow('Incomplete');
     await expect(fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)).rejects.toThrow('incomplete page');
+  });
+
+  it('accepts an empty recent window', async () => {
+    const { rt, mockFetch } = clock();
+    mockFetch.mockResolvedValueOnce(searchPage([]));
+    await expect(fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)).resolves.toEqual({ cves: [], complete: true });
   });
 
   it('increases source failure delays and resets them after recovery', async () => {

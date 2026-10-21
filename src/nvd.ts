@@ -1,7 +1,9 @@
 import { type Cve, type Runtime, record, readJson, retryAfter, ServiceError } from './types';
 import { serviceRequest } from './request';
 
-export const PAGE_SIZE = 200;
+// NVD streams large pages slowly (200 records took ~20 seconds), and the run lease
+// blocks live polls meanwhile. Smaller pages keep each request well inside its deadline.
+export const PAGE_SIZE = 100;
 export const NVD_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
 
 function timestamp(value: unknown): string {
@@ -88,7 +90,7 @@ export async function fetchPage(
     url,
     { headers: apiKey ? { apiKey, Accept: 'application/json' } : { Accept: 'application/json' } },
     rt,
-    15_000,
+    30_000,
     async (response) => {
       if (!response.ok) {
         const delay = retryAfter(response, null, rt.now());

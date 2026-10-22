@@ -1,0 +1,47 @@
+name: Emergency stop
+
+# Stops or resumes alerts within seconds, without deploying. Polling continues while
+# stopped, so queued alerts go out, newest first, after a resume.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Stop or resume alerts
+        required: true
+        type: choice
+        options: [stop, resume]
+      destination:
+        description: Destination
+        required: true
+        type: choice
+        options: [all, telegram, discord]
+
+permissions:
+  contents: read
+
+# Apply requests in order, but never wait behind a deploy in the production group.
+concurrency:
+  group: emergency-stop
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      # The script has no dependencies: skip the install and use the runner's Node.js.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/emergency-stop.mjs
+          sparse-checkout-cone-mode: false
+      # Pass the inputs through the environment so they are never interpreted as shell code.
+      - name: Update destinations
+        env:
+          ACTION: ${{ inputs.action }}
+          DESTINATION: ${{ inputs.destination }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+        run: node scripts/emergency-stop.mjs "$ACTION" "$DESTINATION"

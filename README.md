@@ -64,7 +64,15 @@ This starts recurring alarms and sends real messages. Local NVD recovery needs r
 
 ## Monitoring
 
-Open `/health` for a status page. Use `/api/health/` for overall status, or `/api/health/telegram/` and `/api/health/discord/` for each destination. HTTP 200 means healthy, with status `warn` if the last NVD recovery poll failed but NVD data is still fresh; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
+Open `/health` for a status page. Use `/api/health/` for overall status, or `/api/health/telegram/` and `/api/health/discord/` for each destination. HTTP 200 means healthy, with status `warn` if the last NVD recovery poll failed but NVD data is still fresh, or a destination is stopped; HTTP 503 means unavailable or degraded. Check Cloudflare Worker logs for details.
+
+## Emergency stop
+
+To stop alerts at once, run the **Emergency stop** workflow from the Actions tab with **stop**, for all destinations or just one. The Worker checks before every message, so at most one more message goes out per destination. Nothing is sent or edited until you run the workflow again with **resume**. Polling continues while stopped, and queued alerts go out, newest first, after you resume. The workflow uses the deploy secrets and variable, takes effect without a deployment, and shows each destination's state in its summary. From a terminal, with a Cloudflare API token that has **D1: Edit**:
+
+```sh
+CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<account-id> D1_DATABASE_ID=<database-id> node scripts/emergency-stop.mjs stop
+```
 
 ## Send an existing CVE
 

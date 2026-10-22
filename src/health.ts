@@ -86,6 +86,9 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
     )
       .bind(JSON.stringify(channels))
       .all<{ channel: Channel; pending: number; retrying: number }>();
+    const stopped = await env.DB.prepare(
+      'SELECT channel, stopped_at FROM channel_state WHERE stopped_at IS NOT NULL',
+    ).all<{ channel: Channel; stopped_at: number }>();
     const now = Date.now();
     const time = new Date(now).toISOString();
     const checks: Record<string, HealthCheck[]> = {
@@ -97,15 +100,23 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
     for (const channel of channels) {
       const queue = pending.results.find((row) => row.channel === channel);
       const retrying = queue?.retrying ?? 0;
+      const stoppedAt = stopped.results.find((row) => row.channel === channel)?.stopped_at;
+      const notes = [
+        ...(stoppedAt !== undefined
+          ? [`Stopped by the Emergency stop workflow at ${new Date(stoppedAt).toISOString()}.`]
+          : []),
+        ...(retrying > 0 ? [`${retrying} pending deliveries are awaiting retry.`] : []),
+      ];
       checks[channel] = [
         {
           componentId: channel,
           componentType: 'component',
-          status: retrying === 0 ? 'pass' : 'fail',
+          // A deliberate stop is not a failure, and its queued deliveries do not retry.
+          status: stoppedAt !== undefined ? 'warn' : retrying === 0 ? 'pass' : 'fail',
           time,
           observedValue: queue?.pending ?? 0,
           observedUnit: 'messages',
-          output: retrying > 0 ? `${retrying} pending deliveries are awaiting retry.` : undefined,
+          output: notes.join(' ') || undefined,
         },
       ];
     }

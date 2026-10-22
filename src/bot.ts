@@ -75,10 +75,15 @@ export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promi
     for (const channel of channels) {
       if (rt.now() >= deadline) return;
       if (blocked.has(channel)) continue;
-      const cooldown = await env.DB.prepare('SELECT next_send_at FROM channel_state WHERE channel = ?')
+      const state = await env.DB.prepare('SELECT next_send_at, stopped_at FROM channel_state WHERE channel = ?')
         .bind(channel)
-        .first<number>('next_send_at');
-      const wait = Math.max(0, (cooldown ?? 0) - rt.now());
+        .first<{ next_send_at: number; stopped_at: number | null }>();
+      // Checked before every message, so an emergency stop interrupts a run in progress.
+      if (state && state.stopped_at !== null) {
+        blocked.add(channel);
+        continue;
+      }
+      const wait = Math.max(0, (state?.next_send_at ?? 0) - rt.now());
       if (wait > 1500 || rt.now() + wait >= deadline) {
         blocked.add(channel);
         continue;

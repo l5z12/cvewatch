@@ -86,7 +86,7 @@ beforeEach(async () => {
     ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'delta_poll_state', 'run_lock', 'send_requests'].map(
       (table) => env.DB.prepare(`DELETE FROM ${table}`),
     ),
-    env.DB.prepare('UPDATE channel_state SET next_send_at = 0'),
+    env.DB.prepare('UPDATE channel_state SET next_send_at = 0, stopped_at = NULL'),
   ]);
 });
 
@@ -230,6 +230,37 @@ describe('delivery and recovery', () => {
     expect(
       await env.DB.prepare("SELECT next_send_at FROM channel_state WHERE channel = 'telegram'").first('next_send_at'),
     ).toBe(NOW + 600_000);
+  });
+
+  it('stops sending and editing mid-run until an emergency stop is lifted', async () => {
+    const { rt, mockFetch } = clock();
+    await seed([cve(), { ...cve(), id: 'CVE-2026-12346' }, { ...cve(), id: 'CVE-2026-12347' }]);
+    // A sent alert queued again to add a score.
+    await env.DB.prepare("UPDATE deliveries SET message_id = '7' WHERE cve_id = 'CVE-2026-12347'").run();
+    const stop = env.DB.prepare("UPDATE channel_state SET stopped_at = ? WHERE channel = 'telegram'").bind(NOW);
+    mockFetch.mockImplementation(async (url) => {
+      if (!String(url).includes('telegram')) return Response.json({ id: 'sent' });
+      // The workflow stops Telegram while the first message is in flight.
+      await stop.run();
+      return Response.json({ ok: true, result: { message_id: 1 } });
+    });
+    const telegram = () => mockFetch.mock.calls.filter(([url]) => String(url).includes('telegram')).length;
+    const pending = (channel: string) =>
+      env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE channel = ? AND sent_at IS NULL')
+        .bind(channel)
+        .first('n');
+    await deliver(botEnv(), rt, NOW + 45_000);
+    expect(telegram()).toBe(1);
+    expect(await pending('telegram')).toBe(2);
+    expect(await pending('discord')).toBe(0);
+    await deliver(botEnv(), rt, rt.now() + 45_000);
+    expect(telegram()).toBe(1);
+
+    await env.DB.prepare('UPDATE channel_state SET stopped_at = NULL').run();
+    mockFetch.mockImplementation(async () => Response.json({ ok: true, result: { message_id: 2 } }));
+    await deliver(botEnv(), rt, rt.now() + 45_000);
+    expect(await pending('telegram')).toBe(0);
+    expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/editMessageText'))).toBe(true);
   });
 
   it('keeps pending alerts on network failure without storing credential-bearing errors', async () => {
@@ -498,6 +529,29 @@ describe('destination health endpoints', () => {
     });
     expect(network).not.toHaveBeenCalled();
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(2);
+  });
+
+  it('warns while a destination is stopped, even with deliveries awaiting retry', async () => {
+    await env.DB.prepare("UPDATE channel_state SET stopped_at = ? WHERE channel = 'telegram'")
+      .bind(Date.parse('2026-10-22T20:00:00Z'))
+      .run();
+    await env.DB.prepare("UPDATE deliveries SET last_error = 'telegram HTTP/API 401' WHERE channel = 'telegram'").run();
+    const response = await health('/api/health/telegram/');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: 'warn',
+      checks: {
+        telegram: [
+          {
+            status: 'warn',
+            observedValue: 1,
+            output:
+              'Stopped by the Emergency stop workflow at 2026-10-22T20:00:00.000Z. 1 pending deliveries are awaiting retry.',
+          },
+        ],
+      },
+    });
+    expect(await (await health('/api/health/discord/')).json()).toMatchObject({ status: 'pass' });
   });
 
   it.each(['poll_state', 'live_poll_state', 'delta_poll_state'])(

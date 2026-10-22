@@ -4,7 +4,7 @@
 
 Sends newly published CVEs to Telegram, Discord, or both.
 
-Checks the CVE List's GitHub delta and CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. New CVEs usually arrive within minutes of publication. Includes unscored CVEs, deduplicates IDs, and retries failed deliveries. When the CNA, CISA, or NVD publishes a score for a CVE that was alerted without one, the alert is edited to show it; edits do not send a new notification. Upstream indexing and rate limits can delay alerts; exact publication-time delivery is not guaranteed. A crash after sending can occasionally cause a duplicate.
+Checks the CVE List's GitHub delta and CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. New CVEs usually arrive within minutes of publication. Includes unscored CVEs, deduplicates IDs, and retries failed deliveries. When a CNA publishes a placeholder description such as "No description provided", the alert shows the record's title, or its weakness and affected products, instead. When the CNA, CISA, or NVD publishes a score for a CVE that was alerted without one, the alert is edited to show it; edits do not send a new notification. Upstream indexing and rate limits can delay alerts; exact publication-time delivery is not guaranteed. A crash after sending can occasionally cause a duplicate.
 
 ## Deploy with GitHub Actions
 

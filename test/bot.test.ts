@@ -811,21 +811,51 @@ describe('recent publications from the CVE Program', () => {
     ).toMatchObject({ score: 7.5, severity: 'HIGH', exploited: true });
   });
 
-  it('shows the CNA title in place of a placeholder description', () => {
-    const record = programRecord('CVE-2026-79891', '2026-10-22T19:06:26.615Z');
+  it('replaces placeholder descriptions with the record details', () => {
+    const parse = (cna: Record<string, unknown>, description = 'No description provided') =>
+      parseCveRecord({
+        ...programRecord('CVE-2026-79891', '2026-10-22T19:06:26.615Z'),
+        containers: { cna: { descriptions: [{ lang: 'en', value: description }], ...cna } },
+      })!;
     const title = 'Unauthenticated Buffer Overflow Vulnerability leads to Remote Code Execution in AOS-8';
-    const parsed = parseCveRecord({
-      ...record,
-      containers: { cna: { title, descriptions: [{ lang: 'en', value: 'No description provided' }] } },
-    })!;
-    expect(parsed.title).toBe(title);
-    expect(message(parsed)).toContain(`\n\n${title}\n\n`);
-    expect(message(parsed)).not.toContain('No description provided');
-    expect(message(parsed)).toContain('Published: 2026-10-22 19:06:26 UTC\n');
-    // A real description is kept even when the record has a title.
-    const described = parseCveRecord({ ...record, containers: { cna: { ...record.containers.cna, title } } })!;
-    expect(message(described)).toContain('Recently published vulnerability.');
-    expect(message(described)).not.toContain(title);
+    // Placeholders seen from HPE and OX, which have published dozens of them.
+    const hpe = parse({
+      title,
+      affected: [{ vendor: 'Hewlett Packard Enterprise (HPE)', product: 'Unknown product' }],
+    });
+    expect(message(hpe)).toContain(`\n\n${title}\n\n`);
+    expect(message(hpe)).toContain('Published: 2026-10-22 19:06:26 UTC\n');
+    expect(
+      parse(
+        {
+          affected: [
+            { vendor: 'Open-Xchange GmbH', product: 'OX Dovecot Pro' },
+            { vendor: 'Open-Xchange GmbH', product: 'OX Dovecot CE' },
+          ],
+          problemTypes: [{ descriptions: [{ lang: 'en', type: 'CWE', description: 'Improper Access Control' }] }],
+        },
+        'None None None No publicly available exploits are known.',
+      ).description,
+    ).toBe('Improper Access Control in OX Dovecot Pro, OX Dovecot CE');
+    expect(
+      parse({ affected: [{ vendor: 'Hewlett Packard Enterprise (HPE)', product: 'Unknown product' }] }).description,
+    ).toBe('Vulnerability in Hewlett Packard Enterprise (HPE)');
+    expect(parse({ title: 'n/a', problemTypes: [{ descriptions: [{ description: 'n/a' }] }] }, ' ').description).toBe(
+      'No description is available yet.',
+    );
+    // Real descriptions are kept, including short and non-English ones.
+    for (const description of [
+      'Recently published vulnerability.',
+      'IBM Langflow OSS 1.0.0 through 1.11.5.',
+      '缓冲区溢出',
+    ]) {
+      expect(parse({ title }, description).description).toBe(description);
+    }
+    // NVD records have no other fields to fall back on.
+    const nvd = parseCve(
+      rawCve('CVE-2026-79891', { descriptions: [{ lang: 'en', value: 'No description provided' }] }),
+    );
+    expect(nvd?.description).toBe('No description is available yet.');
   });
 
   it('rolls back recent records when an outbox transaction fails', async () => {
@@ -922,7 +952,13 @@ describe('requested CVEs', () => {
     expect(nvd.origin + nvd.pathname).toBe(NVD_URL);
     expect(nvd.searchParams.get('cveId')).toBe(ID);
     const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
-    expect(stored).toMatchObject({ source: 'NVD', score: 10, exploited: true, requested: true });
+    expect(stored).toMatchObject({
+      source: 'NVD',
+      description: 'Recently published vulnerability.',
+      score: 10,
+      exploited: true,
+      requested: true,
+    });
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(2);
   });
 

@@ -5,6 +5,32 @@ import { serviceRequest } from './request';
 // blocks live polls meanwhile. Smaller pages keep each request well inside its deadline.
 export const PAGE_SIZE = 100;
 export const NVD_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0';
+export const NO_DESCRIPTION = 'No description is available yet.';
+
+// Words that make up the placeholders CNAs publish for empty fields, such as "No
+// description provided" or "None None None No publicly available exploits are known."
+// A real description always names something outside this list.
+const FILLER = new Set(
+  `a added an and are available be description details exploits information is known later n/a na no none not
+  null pending placeholder product provided publicly published reserved soon tba tbd to undefined unknown
+  updated vendor will yet`.split(/\s+/),
+);
+
+export function informative(text: string): boolean {
+  return text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}/]+/u)
+    .some((word) => word && !FILLER.has(word));
+}
+
+// Bounds a 200-record JSON batch below D1's 2 MB bound-value limit, including
+// text consisting entirely of multi-byte characters.
+export function plainText(text: string): string {
+  return text
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim()
+    .slice(0, 2000);
+}
 
 function timestamp(value: unknown): string {
   if (typeof value !== 'string') throw new ServiceError('Invalid NVD timestamp');
@@ -60,11 +86,9 @@ export function parseCve(value: unknown): Cve | null {
     id: value.id,
     published,
     description:
-      typeof description?.value === 'string'
-        ? // Bounds a 200-record JSON batch below D1's 2 MB bound-value limit,
-          // including descriptions consisting entirely of multi-byte characters.
-          description.value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2000)
-        : 'No description is available yet.',
+      typeof description?.value === 'string' && informative(description.value)
+        ? plainText(description.value)
+        : NO_DESCRIPTION,
     severity,
     score,
     cvssVersion,

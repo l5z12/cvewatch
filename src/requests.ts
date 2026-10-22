@@ -26,8 +26,9 @@ async function resolve(id: string, env: BotEnv, rt: Runtime): Promise<Cve | stri
   // Older records often lack CNA metrics that NVD has since scored.
   try {
     const nvd = await fetchCve(id, env.NVD_API_KEY, rt);
+    // NVD copies the CNA's description but has no title or other fields to replace a placeholder.
     if (nvd && nvd.score !== null) {
-      return { ...nvd, ...(cve.title ? { title: cve.title } : {}), exploited: nvd.exploited || cve.exploited };
+      return { ...nvd, description: cve.description, exploited: nvd.exploited || cve.exploited };
     }
   } catch (error) {
     console.error(JSON.stringify({ event: 'request_nvd_failed', cve: id, error: safeError(error) }));

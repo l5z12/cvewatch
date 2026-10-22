@@ -19,6 +19,8 @@ export interface Cve {
   id: string;
   published: string;
   description: string;
+  // The CNA's title, which CVE Program records may have and NVD records do not.
+  title?: string;
   severity: string;
   score: number | null;
   cvssVersion: string | null;

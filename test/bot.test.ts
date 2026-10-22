@@ -811,6 +811,23 @@ describe('recent publications from the CVE Program', () => {
     ).toMatchObject({ score: 7.5, severity: 'HIGH', exploited: true });
   });
 
+  it('shows the CNA title in place of a placeholder description', () => {
+    const record = programRecord('CVE-2026-79891', '2026-10-22T19:06:26.615Z');
+    const title = 'Unauthenticated Buffer Overflow Vulnerability leads to Remote Code Execution in AOS-8';
+    const parsed = parseCveRecord({
+      ...record,
+      containers: { cna: { title, descriptions: [{ lang: 'en', value: 'No description provided' }] } },
+    })!;
+    expect(parsed.title).toBe(title);
+    expect(message(parsed)).toContain(`\n\n${title}\n\n`);
+    expect(message(parsed)).not.toContain('No description provided');
+    expect(message(parsed)).toContain('Published: 2026-10-22 19:06:26 UTC\n');
+    // A real description is kept even when the record has a title.
+    const described = parseCveRecord({ ...record, containers: { cna: { ...record.containers.cna, title } } })!;
+    expect(message(described)).toContain('Recently published vulnerability.');
+    expect(message(described)).not.toContain(title);
+  });
+
   it('rolls back recent records when an outbox transaction fails', async () => {
     const { rt, mockFetch } = clock();
     await env.DB.prepare(

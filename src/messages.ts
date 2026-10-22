@@ -6,19 +6,24 @@ function clip(text: string, length: number): string {
   return chars.length > length ? `${chars.slice(0, length - 1).join('')}…` : text;
 }
 
+// Some CNAs publish a placeholder like "No description provided". It matches
+// NVD's own "No description is available yet." too.
+const PLACEHOLDER = /^(?:no description(?: is)?(?: provided| available)?(?: yet)?|n\/?a|tbd|none)?\.?$/i;
+
 export function message(cve: Cve): string {
   const score =
     cve.score === null
       ? 'not scored yet'
       : `${cve.score.toFixed(1)}/10${cve.cvssVersion ? ` (CVSS ${cve.cvssVersion})` : ''}`;
+  const summary = cve.title && PLACEHOLDER.test(cve.description.trim()) ? cve.title : cve.description;
   return [
     cve.requested ? cve.id : `New CVE: ${cve.id}`,
     `${cve.severity} · ${score}`,
-    `Published: ${cve.published.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')}`,
+    `Published: ${cve.published.replace('T', ' ').replace(/(?:\.\d+)?Z$/, ' UTC')}`,
     `Source: ${cve.source ?? 'NVD'}`,
     ...(cve.exploited ? ['Known exploited vulnerability (CISA KEV)'] : []),
     '',
-    clip(cve.description, 1200),
+    clip(summary, 1200),
     '',
     `https://www.cve.org/CVERecord?id=${cve.id}`,
     `https://nvd.nist.gov/vuln/detail/${cve.id}`,

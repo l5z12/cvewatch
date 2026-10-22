@@ -3,7 +3,7 @@ import { applyD1Migrations, runDurableObjectAlarm, runInDurableObject } from 'cl
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deliver, poll, run, runLive } from '../src/bot';
 import { DELTA_URL, pollDelta, recordUrl } from '../src/cve-list';
-import { fetchRecentPage, parseCveRecord, pollRecent } from '../src/cve-search';
+import { fetchRecentPage, PARSER_VERSION, parseCveRecord, pollRecent } from '../src/cve-search';
 import worker from '../src/index';
 import { message, send, validateSecrets } from '../src/messages';
 import { fetchPage, NVD_URL, PAGE_SIZE, parseCve } from '../src/nvd';
@@ -232,6 +232,53 @@ describe('delivery and recovery', () => {
     ).toBe(NOW + 600_000);
   });
 
+  it('parses alerts queued by an older parser again, keeping a score added since', async () => {
+    const { rt, mockFetch } = clock();
+    // Stored before placeholders were replaced, then scored by NVD.
+    const stale = (id: string): Cve => ({
+      ...cve(),
+      id,
+      description: 'No description provided',
+      source: 'CVE Program',
+      score: 7.5,
+      severity: 'HIGH',
+      cvssVersion: '3.1',
+    });
+    await seed([stale('CVE-2026-50000'), stale('CVE-2026-50001')]);
+    mockFetch.mockImplementation(async (url) => {
+      if (String(url) === recordUrl('CVE-2026-50000')) return Response.json(programRecord('CVE-2026-50000'));
+      // The CVE List is unavailable for the other alert.
+      if (String(url) === recordUrl('CVE-2026-50001')) return new Response(null, { status: 503 });
+      return String(url).includes('telegram')
+        ? Response.json({ ok: true, result: { message_id: 1 } })
+        : Response.json({ id: 'sent' });
+    });
+    await deliver(botEnv(), rt, NOW + 45_000);
+    const bodies = mockFetch.mock.calls
+      .filter(([, init]) => init?.method === 'POST')
+      .map(([, init]) => String(init?.body));
+    expect(bodies).toHaveLength(4);
+    // The refreshed payload is stored once and used for both destinations.
+    expect(mockFetch.mock.calls.filter(([url]) => String(url) === recordUrl('CVE-2026-50000'))).toHaveLength(1);
+    const payload = async (id: string) =>
+      JSON.parse((await env.DB.prepare('SELECT payload FROM cves WHERE id = ?').bind(id).first<string>('payload'))!);
+    expect(await payload('CVE-2026-50000')).toMatchObject({
+      description: 'Recently published vulnerability.',
+      score: 7.5,
+      severity: 'HIGH',
+      parser: PARSER_VERSION,
+    });
+    expect(bodies.filter((body) => body.includes('CVE-2026-50000'))).toHaveLength(2);
+    for (const body of bodies.filter((body) => body.includes('CVE-2026-50000'))) {
+      expect(body).toContain('Recently published vulnerability.');
+      expect(body).toContain('HIGH · 7.5/10 (CVSS 3.1)');
+    }
+    // The other alert goes out as stored rather than waiting for the CVE List.
+    expect(await payload('CVE-2026-50001')).toMatchObject({ description: 'No description provided' });
+    expect(await payload('CVE-2026-50001')).not.toHaveProperty('parser');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
+  });
+
   it('stops sending and editing mid-run until an emergency stop is lifted', async () => {
     const { rt, mockFetch } = clock();
     await seed([cve(), { ...cve(), id: 'CVE-2026-12346' }, { ...cve(), id: 'CVE-2026-12347' }]);
@@ -359,6 +406,21 @@ describe('formatting and configuration', () => {
     expect(telegram.parse_mode).toBeUndefined();
     expect(discord.allowed_mentions).toEqual({ parse: [] });
     expect(new URL(String(mockFetch.mock.calls[1]![0])).searchParams.get('wait')).toBe('true');
+  });
+
+  it('shows descriptions literally: as plain text on Telegram and in a code block on Discord', async () => {
+    const { rt, mockFetch } = clock();
+    const description = 'A __CONTENT__ payload, *glob*, ||x|| and [link](https://evil.test).\n\n# See ```code```.';
+    const alert = { ...cve(), description };
+    mockFetch.mockResolvedValueOnce(Response.json({ ok: true })).mockResolvedValueOnce(Response.json({ id: 'sent' }));
+    await send('telegram', alert, botEnv(), rt);
+    await send('discord', alert, botEnv(), rt);
+    const telegram = JSON.parse(String(mockFetch.mock.calls[0]![1]?.body)).text;
+    const discord = JSON.parse(String(mockFetch.mock.calls[1]![1]?.body)).embeds[0].description;
+    expect(telegram).toContain(`\n\n${description}\n\n`);
+    expect(discord).toContain(`\n\n\`\`\`\n${description.replaceAll('```', '``​`')}\n\`\`\`\n\nhttps://www.cve.org/`);
+    // Only the block's own fences remain.
+    expect(discord.match(/```/g)).toHaveLength(2);
   });
 
   it('requires confirmed API success, even for HTTP 200', async () => {
@@ -905,11 +967,45 @@ describe('recent publications from the CVE Program', () => {
     ]) {
       expect(parse({ title }, description).description).toBe(description);
     }
+    // Wrapped lines are joined, but paragraph breaks and list items are kept.
+    expect(
+      parse({}, 'A NULL pointer dereference occurs when the\nremote peer sends keys.\nFixed by:\n- one\n2) two')
+        .description,
+    ).toBe('A NULL pointer dereference occurs when the remote peer sends keys. Fixed by:\n- one\n2) two');
+    // Apache separates paragraphs with four line breaks.
+    expect(
+      parse({}, 'Exhausts a worker pool.\r\n\r\n\r\n\r\n  This issue affects\tX.\n\n\n\nUpgrade.').description,
+    ).toBe('Exhausts a worker pool.\n\nThis issue affects X.\n\nUpgrade.');
     // NVD records have no other fields to fall back on.
     const nvd = parseCve(
       rawCve('CVE-2026-79891', { descriptions: [{ lang: 'en', value: 'No description provided' }] }),
     );
     expect(nvd?.description).toBe('No description is available yet.');
+  });
+
+  it('shows a severity the CNA rated in words until a CVSS score is published', () => {
+    const rated = (metrics: unknown[]) =>
+      parseCveRecord({ ...programRecord(), containers: { cna: { ...programRecord().containers.cna, metrics } } })!;
+    // As Apache, OpenSSL, and Red Hat publish them.
+    const apache = rated([{ other: { type: 'Textual description of severity', content: { text: 'moderate' } } }]);
+    expect(apache).toMatchObject({ severity: 'MODERATE', score: null, parser: PARSER_VERSION });
+    expect(message(apache)).toContain('\nMODERATE · no CVSS score yet\n');
+    const openssl = { type: 'https://openssl-library.org/policies/general/security-policy/', content: { text: 'Low' } };
+    expect(rated([{ format: 'other', other: openssl }]).severity).toBe('LOW');
+    const redhat = {
+      type: 'Red Hat severity rating',
+      content: { value: 'Important', namespace: 'https://redhat.test' },
+    };
+    expect(rated([{ other: redhat }]).severity).toBe('IMPORTANT');
+    expect(
+      rated([
+        { other: { type: 'Textual description of severity', content: { text: 'low' } } },
+        { cvssV3_1: { version: '3.1', baseScore: 9.8, baseSeverity: 'CRITICAL' } },
+      ]),
+    ).toMatchObject({ severity: 'CRITICAL', score: 9.8 });
+    // Other text in "other" metrics is not a rating.
+    expect(rated([{ other: { type: 'Impact', content: { text: 'Remote code execution' } } }]).severity).toBe('UNKNOWN');
+    expect(message(rated([]))).toContain('\nUNKNOWN · not scored yet\n');
   });
 
   it('rolls back recent records when an outbox transaction fails', async () => {

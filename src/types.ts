@@ -24,6 +24,8 @@ export interface Cve {
   cvssVersion: string | null;
   exploited: boolean;
   source?: 'CVE Program' | 'NVD';
+  // The parser version that stored a CVE Program alert. Absent means version 1.
+  parser?: number;
   // Sent on request rather than discovered, so it may not be new.
   requested?: boolean;
 }

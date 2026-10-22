@@ -6,11 +6,21 @@ function clip(text: string, length: number): string {
   return chars.length > length ? `${chars.slice(0, length - 1).join('')}…` : text;
 }
 
-export function message(cve: Cve): string {
+// Discord renders embed text as Markdown, so its description goes in a code block to
+// show the CNA's text as written. A zero-width space keeps the text from closing it.
+function codeBlock(text: string): string {
+  return `\`\`\`\n${text.replaceAll('```', '``​`')}\n\`\`\``;
+}
+
+export function message(cve: Cve, channel: Channel = 'telegram'): string {
   const score =
-    cve.score === null
-      ? 'not scored yet'
-      : `${cve.score.toFixed(1)}/10${cve.cvssVersion ? ` (CVSS ${cve.cvssVersion})` : ''}`;
+    cve.score !== null
+      ? `${cve.score.toFixed(1)}/10${cve.cvssVersion ? ` (CVSS ${cve.cvssVersion})` : ''}`
+      : cve.severity === 'UNKNOWN'
+        ? 'not scored yet'
+        : // The CNA rated it in words.
+          'no CVSS score yet';
+  const description = clip(cve.description, 1200);
   return [
     cve.requested ? cve.id : `New CVE: ${cve.id}`,
     `${cve.severity} · ${score}`,
@@ -18,7 +28,7 @@ export function message(cve: Cve): string {
     `Source: ${cve.source ?? 'NVD'}`,
     ...(cve.exploited ? ['Known exploited vulnerability (CISA KEV)'] : []),
     '',
-    clip(cve.description, 1200),
+    channel === 'discord' ? codeBlock(description) : description,
     '',
     `https://www.cve.org/CVERecord?id=${cve.id}`,
     `https://nvd.nist.gov/vuln/detail/${cve.id}`,
@@ -64,7 +74,7 @@ export function validateSecrets(env: BotEnv): void {
 }
 
 function content(channel: Channel, cve: Cve, env: BotEnv): Record<string, unknown> {
-  const text = message(cve);
+  const text = message(cve, channel);
   return channel === 'telegram'
     ? { chat_id: env.TELEGRAM_CHAT_ID, text, link_preview_options: { is_disabled: true } }
     : {

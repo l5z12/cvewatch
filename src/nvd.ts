@@ -23,11 +23,17 @@ export function informative(text: string): boolean {
     .some((word) => word && !FILLER.has(word));
 }
 
-// Bounds a 200-record JSON batch below D1's 2 MB bound-value limit, including
+// Keeps paragraph breaks, which some CNAs make with four line breaks, and list items.
+// Other line breaks only wrap lines, as in Linux kernel descriptions, so they become
+// spaces. Bounds a 200-record JSON batch below D1's 2 MB bound-value limit, including
 // text consisting entirely of multi-byte characters.
 export function plainText(text: string): string {
   return text
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{2,}/g, '\n\n')
+    .replace(/(?<!\n)\n(?!\n|(?:[-*•]|\d+[.)]) )/g, ' ')
     .trim()
     .slice(0, 2000);
 }

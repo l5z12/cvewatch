@@ -4,7 +4,7 @@
 
 Sends newly published CVEs to Telegram, Discord, or both.
 
-Checks the CVE List's GitHub delta and CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. New CVEs usually arrive within minutes of publication. Includes unscored CVEs, deduplicates IDs, and retries failed deliveries. When a CNA publishes a placeholder description such as "No description provided", the alert shows the record's title, or its weakness and affected products, instead. When the CNA, CISA, or NVD publishes a score for a CVE that was alerted without one, the alert is edited to show it; edits do not send a new notification. Upstream indexing and rate limits can delay alerts; exact publication-time delivery is not guaranteed. A crash after sending can occasionally cause a duplicate.
+Checks the CVE List's GitHub delta and CVE Search every **15 seconds**, with NVD recovery every **5 minutes**. New CVEs usually arrive within minutes of publication. Includes unscored CVEs, deduplicates IDs, and retries failed deliveries. When a CNA publishes a placeholder description such as "No description provided", the alert shows the record's title, or its weakness and affected products, instead. When a CNA rates severity only in words, such as Apache's "moderate", the alert shows that rating until a CVSS score is published. Discord alerts show the description in a code block, so it appears exactly as published. When the CNA, CISA, or NVD publishes a score for a CVE that was alerted without one, the alert is edited to show it; edits do not send a new notification. Upstream indexing and rate limits can delay alerts; exact publication-time delivery is not guaranteed. A crash after sending can occasionally cause a duplicate.
 
 ## Deploy with GitHub Actions
 
@@ -61,6 +61,8 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=*+*+*+*+*"
 ```
 
 This starts recurring alarms and sends real messages. Local NVD recovery needs repeated calls. Stop the dev server to stop activity. `pnpm check` uses mocked messaging APIs.
+
+When you change how CVE Program records are parsed in a way that alters alerts, increase `PARSER_VERSION` in `src/cve-search.ts`. Alerts queued before the deployment are then parsed again before they are sent.
 
 ## Monitoring
 

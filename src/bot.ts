@@ -1,6 +1,6 @@
 import { fetchPage } from './nvd';
-import { pollDelta } from './cve-list';
-import { pollRecent } from './cve-search';
+import { pollDelta, refreshRecord } from './cve-list';
+import { PARSER_VERSION, pollRecent } from './cve-search';
 import { enqueueStatements, scoreStatements } from './outbox';
 import { edit, enabledChannels, send, validateSecrets } from './messages';
 import { processRequests } from './requests';
@@ -56,6 +56,22 @@ export async function poll(env: BotEnv, rt: Runtime): Promise<void> {
   );
 }
 
+// Alerts queued before a parsing fix was deployed are parsed again before they are sent
+// or edited. If the CVE List is unavailable, the stored alert goes out instead.
+async function current(cve: Cve, env: BotEnv, rt: Runtime): Promise<Cve> {
+  if (cve.source !== 'CVE Program' || (cve.parser ?? 1) >= PARSER_VERSION) return cve;
+  let fresh: Cve;
+  try {
+    fresh = await refreshRecord(cve, env, rt);
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'refresh_failed', cve: cve.id, error: safeError(error) }));
+    return cve;
+  }
+  await env.DB.prepare('UPDATE cves SET payload = ? WHERE id = ?').bind(JSON.stringify(fresh), cve.id).run();
+  console.log(JSON.stringify({ event: 'alert_refreshed', cve: cve.id }));
+  return fresh;
+}
+
 interface PendingDelivery {
   cve_id: string;
   payload: string;
@@ -103,7 +119,7 @@ export async function deliver(env: BotEnv, rt: Runtime, deadline: number): Promi
       let messageId = row.message_id;
       let edited = false;
       try {
-        const cve = JSON.parse(row.payload) as Cve;
+        const cve = await current(JSON.parse(row.payload) as Cve, env, rt);
         if (messageId === null) messageId = await send(channel, cve, env, rt);
         else edited = await edit(channel, cve, messageId, env, rt);
       } catch (error) {

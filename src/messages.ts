@@ -9,7 +9,7 @@ function clip(text: string, length: number): string {
 // Discord renders embed text as Markdown, so its description goes in a code block to
 // show the CNA's text as written. A zero-width space keeps the text from closing it.
 function codeBlock(text: string): string {
-  return `\`\`\`\n${text.replaceAll('```', '``​`')}\n\`\`\``;
+  return `\`\`\`\n${text.replaceAll('```', '``\u200b`')}\n\`\`\``;
 }
 
 export function message(cve: Cve, channel: Channel = 'telegram'): string {

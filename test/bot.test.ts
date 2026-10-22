@@ -418,7 +418,9 @@ describe('formatting and configuration', () => {
     const telegram = JSON.parse(String(mockFetch.mock.calls[0]![1]?.body)).text;
     const discord = JSON.parse(String(mockFetch.mock.calls[1]![1]?.body)).embeds[0].description;
     expect(telegram).toContain(`\n\n${description}\n\n`);
-    expect(discord).toContain(`\n\n\`\`\`\n${description.replaceAll('```', '``​`')}\n\`\`\`\n\nhttps://www.cve.org/`);
+    expect(discord).toContain(
+      `\n\n\`\`\`\n${description.replaceAll('```', '``\u200b`')}\n\`\`\`\n\nhttps://www.cve.org/`,
+    );
     // Only the block's own fences remain.
     expect(discord.match(/```/g)).toHaveLength(2);
   });

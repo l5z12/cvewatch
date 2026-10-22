@@ -3,7 +3,7 @@ import { parseCveRecord } from './cve-search';
 import { fetchCve } from './nvd';
 import { resendStatements } from './outbox';
 import { enabledChannels } from './messages';
-import { type BotEnv, type Cve, type Runtime, safeError, ServiceError } from './types';
+import { type BotEnv, type Cve, type KevDetails, type Runtime, safeError, ServiceError } from './types';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -13,6 +13,8 @@ const MAX_REQUESTS = 5;
 interface SendRequest {
   cve_id: string;
   attempts: number;
+  // Set for a CVE added to the CISA KEV catalog.
+  kev: string | null;
 }
 
 // Returns the reason when the CVE can never be sent, so it is not retried.
@@ -36,19 +38,23 @@ async function resolve(id: string, env: BotEnv, rt: Runtime): Promise<Cve | stri
   return cve;
 }
 
-// The send-cve script inserts requests; this queues each for every enabled destination.
+// The send-cve script and the KEV poll insert requests; this queues each for every
+// enabled destination.
 export async function processRequests(env: BotEnv, rt: Runtime): Promise<void> {
   const requests = await env.DB.prepare(
-    `SELECT cve_id, attempts FROM send_requests WHERE failed_at IS NULL AND next_attempt_at <= ?
+    `SELECT cve_id, attempts, kev FROM send_requests WHERE failed_at IS NULL AND next_attempt_at <= ?
     ORDER BY requested_at, cve_id LIMIT ?`,
   )
     .bind(rt.now(), MAX_REQUESTS)
     .all<SendRequest>();
   await Promise.all(
-    requests.results.map(async ({ cve_id: id, attempts }) => {
+    requests.results.map(async ({ cve_id: id, attempts, kev: details }) => {
+      const kev = details === null ? undefined : (JSON.parse(details) as KevDetails);
       let result: Cve | string;
       try {
         result = /^CVE-\d{4}-\d{4,}$/.test(id) ? await resolve(id, env, rt) : 'Invalid CVE ID';
+        // CISA only lists published CVEs, so the CVE List has the record or soon will.
+        if (kev && typeof result === 'string') throw new ServiceError(result);
       } catch (error) {
         const backoff = Math.min(6 * HOUR, MINUTE * 2 ** Math.min(attempts, 12));
         const retryAt = rt.now() + Math.max(backoff, error instanceof ServiceError ? error.retryAfterMs : MINUTE);
@@ -70,10 +76,15 @@ export async function processRequests(env: BotEnv, rt: Runtime): Promise<void> {
         return;
       }
       await env.DB.batch([
-        ...resendStatements(env.DB, { ...result, requested: true }, rt.now(), enabledChannels(env)),
+        ...resendStatements(
+          env.DB,
+          kev ? { ...result, exploited: true, kev } : { ...result, requested: true },
+          rt.now(),
+          enabledChannels(env),
+        ),
         env.DB.prepare('DELETE FROM send_requests WHERE cve_id = ?').bind(id),
       ]);
-      console.log(JSON.stringify({ event: 'request_queued', cve: id, source: result.source }));
+      console.log(JSON.stringify({ event: 'request_queued', cve: id, source: result.source, kev: Boolean(kev) }));
     }),
   );
 }

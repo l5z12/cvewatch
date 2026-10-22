@@ -21,12 +21,20 @@ export function message(cve: Cve, channel: Channel = 'telegram'): string {
         : // The CNA rated it in words.
           'no CVSS score yet';
   const description = clip(cve.description, 1200);
+  const kev = cve.kev;
   return [
-    cve.requested ? cve.id : `New CVE: ${cve.id}`,
+    kev ? `Added to CISA KEV: ${cve.id}` : cve.requested ? cve.id : `New CVE: ${cve.id}`,
     `${cve.severity} · ${score}`,
     `Published: ${cve.published.replace('T', ' ').replace(/(?:\.\d+)?Z$/, ' UTC')}`,
     `Source: ${cve.source ?? 'NVD'}`,
-    ...(cve.exploited ? ['Known exploited vulnerability (CISA KEV)'] : []),
+    ...(kev
+      ? [
+          `KEV: added ${kev.added}${kev.due ? `, due ${kev.due}` : ''}`,
+          ...(kev.ransomware ? ['Known ransomware campaign use'] : []),
+        ]
+      : cve.exploited
+        ? ['Known exploited vulnerability (CISA KEV)']
+        : []),
     '',
     channel === 'discord' ? codeBlock(description) : description,
     '',
@@ -79,7 +87,7 @@ function content(channel: Channel, cve: Cve, env: BotEnv): Record<string, unknow
     ? { chat_id: env.TELEGRAM_CHAT_ID, text, link_preview_options: { is_disabled: true } }
     : {
         allowed_mentions: { parse: [] },
-        embeds: [{ description: text, color: cve.severity === 'CRITICAL' ? 0xdc2626 : 0x2563eb }],
+        embeds: [{ description: text, color: cve.severity === 'CRITICAL' || cve.kev ? 0xdc2626 : 0x2563eb }],
       };
 }
 

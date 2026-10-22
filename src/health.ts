@@ -78,6 +78,9 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
     const delta = await env.DB.prepare(
       'SELECT last_success_at, last_error FROM delta_poll_state WHERE id = 1',
     ).first<PollState>();
+    const kev = await env.DB.prepare(
+      'SELECT last_success_at, last_error FROM kev_poll_state WHERE id = 1',
+    ).first<PollState>();
     const pending = await env.DB.prepare(
       `SELECT channel, COUNT(*) AS pending,
       SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS retrying
@@ -96,6 +99,8 @@ export async function health(env: BotEnv, channel?: Channel): Promise<Response> 
       nvd: [pollCheck('nvd', state, Math.max(30, Number(env.POLL_INTERVAL_MINUTES) * 3) * 60_000, now, true)],
       'cve-list': [pollCheck('cve-list', delta, Math.max(120, Number(env.LIVE_POLL_SECONDS) * 3) * 1000, now)],
       'cve-search': [pollCheck('cve-search', live, Math.max(120, Number(env.LIVE_POLL_SECONDS) * 3) * 1000, now)],
+      // A failed poll only delays KEV alerts: the next catalog still lists the additions.
+      'cisa-kev': [pollCheck('cisa-kev', kev, 30 * 60_000, now, true)],
     };
     for (const channel of channels) {
       const queue = pending.results.find((row) => row.channel === channel);

@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { deliver, poll, run, runLive } from '../src/bot';
 import { DELTA_URL, pollDelta, recordUrl } from '../src/cve-list';
 import { fetchRecentPage, PARSER_VERSION, parseCveRecord, pollRecent } from '../src/cve-search';
+import { fetchCatalog, KEV_URL, pollKev } from '../src/kev';
 import worker from '../src/index';
 import { message, send, validateSecrets } from '../src/messages';
 import { fetchPage, NVD_URL, PAGE_SIZE, parseCve } from '../src/nvd';
@@ -83,9 +84,17 @@ beforeAll(async () => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(async () => {
   await env.DB.batch([
-    ...['deliveries', 'cves', 'poll_state', 'live_poll_state', 'delta_poll_state', 'run_lock', 'send_requests'].map(
-      (table) => env.DB.prepare(`DELETE FROM ${table}`),
-    ),
+    ...[
+      'deliveries',
+      'cves',
+      'poll_state',
+      'live_poll_state',
+      'delta_poll_state',
+      'kev_poll_state',
+      'kev_catalog',
+      'run_lock',
+      'send_requests',
+    ].map((table) => env.DB.prepare(`DELETE FROM ${table}`)),
     env.DB.prepare('UPDATE channel_state SET next_send_at = 0, stopped_at = NULL'),
   ]);
 });
@@ -232,7 +241,7 @@ describe('delivery and recovery', () => {
     ).toBe(NOW + 600_000);
   });
 
-  it('parses alerts queued by an older parser again, keeping a score added since', async () => {
+  it('parses alerts queued by an older parser again, keeping a score and KEV details added since', async () => {
     const { rt, mockFetch } = clock();
     // Stored before placeholders were replaced, then scored by NVD.
     const stale = (id: string): Cve => ({
@@ -243,6 +252,7 @@ describe('delivery and recovery', () => {
       score: 7.5,
       severity: 'HIGH',
       cvssVersion: '3.1',
+      kev: { added: '2026-10-22', due: null, ransomware: false },
     });
     await seed([stale('CVE-2026-50000'), stale('CVE-2026-50001')]);
     mockFetch.mockImplementation(async (url) => {
@@ -266,10 +276,12 @@ describe('delivery and recovery', () => {
       description: 'Recently published vulnerability.',
       score: 7.5,
       severity: 'HIGH',
+      kev: { added: '2026-10-22' },
       parser: PARSER_VERSION,
     });
     expect(bodies.filter((body) => body.includes('CVE-2026-50000'))).toHaveLength(2);
     for (const body of bodies.filter((body) => body.includes('CVE-2026-50000'))) {
+      expect(body).toContain('Added to CISA KEV: CVE-2026-50000');
       expect(body).toContain('Recently published vulnerability.');
       expect(body).toContain('HIGH · 7.5/10 (CVSS 3.1)');
     }
@@ -346,7 +358,8 @@ describe('delivery and recovery', () => {
     advance(60_001);
     mockFetch.mockResolvedValue(page([]));
     await run(botEnv(), rt);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // NVD and the KEV catalog.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM run_lock').first('n')).toBe(0);
   });
 
@@ -371,7 +384,8 @@ describe('delivery and recovery', () => {
           : Response.json({ id: 'sent' }),
     );
     await Promise.all([run(botEnv(), rt), run(botEnv(), rt)]);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // NVD, the KEV catalog, and one message per destination.
+    expect(mockFetch).toHaveBeenCalledTimes(4);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NOT NULL').first('n')).toBe(2);
   });
 });
@@ -460,7 +474,7 @@ describe('formatting and configuration', () => {
     expect(JSON.stringify(body)).not.toContain('secret');
   });
 
-  it.each(['nvd', 'cve-search', 'telegram', 'discord'] as const)(
+  it.each(['nvd', 'cve-search', 'cisa-kev', 'telegram', 'discord'] as const)(
     'rejects %s redirects without forwarding credentials',
     async (service) => {
       const { rt, mockFetch } = clock();
@@ -470,7 +484,9 @@ describe('formatting and configuration', () => {
           ? fetchPage(NOW - 1000, NOW, 0, 'test-api-key', rt)
           : service === 'cve-search'
             ? fetchRecentPage(NOW - 1000, NOW, 1, botEnv(), rt)
-            : send(service, cve(), botEnv(), rt);
+            : service === 'cisa-kev'
+              ? fetchCatalog(null, botEnv(), rt)
+              : send(service, cve(), botEnv(), rt);
       await expect(request).rejects.toThrow('302');
       expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(mockFetch.mock.calls[0]![1]?.redirect).toBe('manual');
@@ -501,6 +517,7 @@ describe('formatting and configuration', () => {
       .bind(now, now)
       .run();
     await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
+    await env.DB.prepare('INSERT INTO kev_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
     const health = () => worker.fetch(new Request('https://worker.test/api/health/'), botEnv());
     expect((await health()).status).toBe(200);
     await env.DB.prepare("UPDATE deliveries SET last_error = 'discord HTTP/API 403' WHERE channel = 'discord'").run();
@@ -523,6 +540,7 @@ describe('formatting and configuration', () => {
       .bind(now, now)
       .run();
     await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
+    await env.DB.prepare('INSERT INTO kev_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
     const health = () => worker.fetch(new Request('https://worker.test/api/health/'), botEnv());
     const response = await health();
     expect(response.status).toBe(200);
@@ -554,6 +572,7 @@ describe('destination health endpoints', () => {
       .bind(now, now)
       .run();
     await env.DB.prepare('INSERT INTO delta_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
+    await env.DB.prepare('INSERT INTO kev_poll_state (id, last_success_at) VALUES (1, ?)').bind(now).run();
   });
 
   it.each(['telegram', 'discord'] as const)('isolates %s delivery health without sending messages', async (channel) => {
@@ -576,6 +595,7 @@ describe('destination health endpoints', () => {
         nvd: [{ status: 'pass' }],
         'cve-list': [{ status: 'pass' }],
         'cve-search': [{ status: 'pass' }],
+        'cisa-kev': [{ status: 'pass' }],
         [channel]: [{ componentId: channel, status: 'pass', observedValue: 1, observedUnit: 'messages' }],
       },
     });
@@ -618,7 +638,7 @@ describe('destination health endpoints', () => {
     expect(await (await health('/api/health/discord/')).json()).toMatchObject({ status: 'pass' });
   });
 
-  it.each(['poll_state', 'live_poll_state', 'delta_poll_state'])(
+  it.each(['poll_state', 'live_poll_state', 'delta_poll_state', 'kev_poll_state'])(
     'includes shared %s failures in both endpoints',
     async (table) => {
       await env.DB.prepare(`UPDATE ${table} SET last_success_at = ?`)
@@ -1321,6 +1341,191 @@ describe('scores published later', () => {
       ['POST', '/api/webhooks/123456789/test-token'],
     ]);
     expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE sent_at IS NULL').first('n')).toBe(0);
+  });
+});
+
+describe('CISA KEV additions', () => {
+  const ID = 'CVE-2021-44228';
+  const PUBLISHED = '2021-12-10T10:15:09.143Z';
+  const LAST_MODIFIED = 'Thu, 22 Oct 2026 05:00:00 GMT';
+  const entry = (cveID: string, dateAdded = '2026-10-22', extra: Record<string, unknown> = {}) => ({
+    cveID,
+    vendorProject: 'Apache',
+    product: 'Log4j2',
+    vulnerabilityName: 'Apache Log4j2 Remote Code Execution Vulnerability',
+    dateAdded,
+    shortDescription: 'Apache Log4j2 contains a remote code execution vulnerability.',
+    requiredAction: 'Apply updates per vendor instructions.',
+    dueDate: '2026-11-12',
+    knownRansomwareCampaignUse: 'Unknown',
+    notes: '',
+    cwes: ['CWE-20'],
+    ...extra,
+  });
+  const catalog = (entries: unknown[]) =>
+    Response.json(
+      {
+        title: 'CISA Catalog of Known Exploited Vulnerabilities',
+        catalogVersion: '2026.10.22',
+        dateReleased: '2026-10-22T05:00:00.000Z',
+        count: entries.length,
+        vulnerabilities: entries,
+      },
+      { headers: { 'Last-Modified': LAST_MODIFIED } },
+    );
+  const requests = async () =>
+    (
+      await env.DB.prepare('SELECT cve_id, kev FROM send_requests ORDER BY cve_id').all<{
+        cve_id: string;
+        kev: string;
+      }>()
+    ).results.map(({ cve_id, kev }) => ({ id: cve_id, kev: JSON.parse(kev) }));
+  const catalogSize = () => env.DB.prepare('SELECT COUNT(*) AS n FROM kev_catalog').first('n');
+
+  it('stores the first catalog as a baseline, then requests only CVEs it has not listed before', async () => {
+    const { rt, mockFetch, advance } = clock();
+    // NOW is 06:00 UTC on October 22, so the 24-hour lookback includes additions on October 21.
+    mockFetch.mockResolvedValueOnce(
+      catalog([entry('CVE-2026-50001', '2026-10-21'), entry('CVE-2026-50000', '2026-10-20'), entry(ID, '2021-12-10')]),
+    );
+    await pollKev(botEnv(), rt);
+    expect(await requests()).toEqual([
+      { id: 'CVE-2026-50001', kev: { added: '2026-10-21', due: '2026-11-12', ransomware: false } },
+    ]);
+    expect(await catalogSize()).toBe(3);
+    await env.DB.prepare('DELETE FROM send_requests').run();
+
+    // An unchanged catalog is not downloaded again.
+    advance(60_000);
+    mockFetch.mockResolvedValueOnce(new Response(null, { status: 304 }));
+    await pollKev(botEnv(), rt);
+    expect(new Headers(mockFetch.mock.calls[1]![1]?.headers).get('If-Modified-Since')).toBe(LAST_MODIFIED);
+    expect(await env.DB.prepare('SELECT last_success_at FROM kev_poll_state').first('last_success_at')).toBe(
+      NOW + 60_000,
+    );
+
+    // An old CVE is requested when it is added. An entry removed and listed again is not.
+    advance(60_000);
+    mockFetch.mockResolvedValueOnce(
+      catalog([entry('CVE-2019-0708', '2026-10-22', { knownRansomwareCampaignUse: 'Known' }), entry(ID, '2021-12-10')]),
+    );
+    await pollKev(botEnv(), rt);
+    advance(60_000);
+    mockFetch.mockResolvedValueOnce(catalog([entry('CVE-2026-50000', '2026-10-20'), entry(ID, '2021-12-10')]));
+    await pollKev(botEnv(), rt);
+    expect(await requests()).toEqual([
+      { id: 'CVE-2019-0708', kev: { added: '2026-10-22', due: '2026-11-12', ransomware: true } },
+    ]);
+    expect(await catalogSize()).toBe(4);
+  });
+
+  it('sends no earlier additions from the first catalog without a lookback', async () => {
+    const { rt, mockFetch } = clock();
+    mockFetch.mockResolvedValueOnce(catalog([entry('CVE-2026-50000')]));
+    // The generated types only allow the configured value.
+    await pollKev({ ...botEnv(), INITIAL_LOOKBACK_HOURS: '0' } as unknown as BotEnv, rt);
+    expect(await requests()).toEqual([]);
+    expect(await catalogSize()).toBe(1);
+  });
+
+  it('sends an already alerted CVE again as a new message with its KEV details', async () => {
+    const { rt, mockFetch } = clock();
+    await seed([{ ...cve(), id: ID, published: PUBLISHED }]);
+    await env.DB.prepare("UPDATE deliveries SET sent_at = ?, attempts = 1, message_id = '7'")
+      .bind(NOW - 60_000)
+      .run();
+    await env.DB.prepare("INSERT INTO kev_catalog (cve_id) VALUES ('CVE-2020-0001')").run();
+    const record = programRecord(ID, PUBLISHED);
+    const metrics = [{ cvssV3_1: { version: '3.1', baseScore: 10, baseSeverity: 'CRITICAL' } }];
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === KEV_URL
+        ? catalog([entry(ID, '2026-10-22', { knownRansomwareCampaignUse: 'Known' }), entry('CVE-2020-0001')])
+        : String(url) === recordUrl(ID)
+          ? Response.json({ ...record, containers: { cna: { ...record.containers.cna, metrics } } })
+          : String(url).includes('telegram')
+            ? Response.json({ ok: true, result: { message_id: 8 } })
+            : Response.json({ id: '1300000000000000002' }),
+    );
+    await pollKev(botEnv(), rt);
+    await processRequests(botEnv(), rt);
+    await deliver(botEnv(), rt, NOW + 45_000);
+    const sends = mockFetch.mock.calls.filter(([url]) => /telegram|discord/.test(String(url)));
+    expect(sends).toHaveLength(2);
+    expect(String(sends[0]![0])).toMatch(/\/sendMessage$/);
+    expect(sends.map(([, init]) => init?.method)).toEqual(['POST', 'POST']);
+    const text = JSON.parse(String(sends[0]![1]?.body)).text;
+    expect(text).toMatch(
+      /^Added to CISA KEV: CVE-2021-44228\nCRITICAL · 10\.0\/10 \(CVSS 3\.1\)\nPublished: 2021-12-10 10:15:09 UTC\nSource: CVE Program\nKEV: added 2026-10-22, due 2026-11-12\nKnown ransomware campaign use\n\nRecently published vulnerability\.\n/,
+    );
+    expect(text).not.toContain('Known exploited vulnerability (CISA KEV)');
+    expect(JSON.parse(String(sends[1]![1]?.body)).embeds[0].color).toBe(0xdc2626);
+    expect(
+      (await env.DB.prepare('SELECT channel, sent_at, message_id FROM deliveries ORDER BY channel').all()).results,
+    ).toEqual([
+      { channel: 'discord', sent_at: NOW, message_id: '1300000000000000002' },
+      { channel: 'telegram', sent_at: NOW, message_id: '8' },
+    ]);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({
+      kev: { added: '2026-10-22', due: '2026-11-12', ransomware: true },
+      exploited: true,
+      score: 10,
+    });
+    expect(stored).not.toHaveProperty('requested');
+    expect(await requests()).toEqual([]);
+  });
+
+  it('retries a KEV request until the CVE List has the record', async () => {
+    const { rt, mockFetch, advance } = clock();
+    await env.DB.prepare('INSERT INTO send_requests (cve_id, requested_at, kev) VALUES (?, ?, ?)')
+      .bind(ID, NOW, JSON.stringify({ added: '2026-10-22', due: null, ransomware: false }))
+      .run();
+    mockFetch.mockResolvedValueOnce(new Response('404: Not Found', { status: 404 }));
+    await processRequests(botEnv(), rt);
+    expect(
+      await env.DB.prepare('SELECT attempts, next_attempt_at, failed_at, last_error FROM send_requests').first(),
+    ).toEqual({ attempts: 1, next_attempt_at: NOW + 60_000, failed_at: null, last_error: 'Not found in the CVE List' });
+    advance(60_000);
+    // The record has no score, and NVD is unavailable.
+    mockFetch
+      .mockResolvedValueOnce(Response.json(programRecord(ID, PUBLISHED)))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }));
+    await processRequests(botEnv(), rt);
+    expect(await requests()).toEqual([]);
+    const stored = JSON.parse((await env.DB.prepare('SELECT payload FROM cves').first<string>('payload'))!);
+    expect(stored).toMatchObject({ score: null, kev: { due: null } });
+    expect(message(stored)).toContain('\nKEV: added 2026-10-22\n');
+  });
+
+  it('rejects empty or incomplete catalogs without storing a baseline', async () => {
+    const { rt, mockFetch } = clock();
+    const valid = { count: 1, vulnerabilities: [entry(ID)] };
+    for (const [body, error] of [
+      [{ count: 0, vulnerabilities: [] }, 'Invalid CISA KEV catalog'],
+      [{ ...valid, count: 2 }, 'Invalid CISA KEV catalog'],
+      [{ ...valid, vulnerabilities: [entry('CVE-1')] }, 'Invalid CISA KEV entry'],
+      [{ ...valid, vulnerabilities: [entry(ID, '22 October 2026')] }, 'Invalid CISA KEV entry'],
+    ] as const) {
+      mockFetch.mockResolvedValueOnce(Response.json(body));
+      await expect(pollKev(botEnv(), rt)).rejects.toThrow(error);
+    }
+    expect(await catalogSize()).toBe(0);
+  });
+
+  it('backs off a failed catalog poll without stopping NVD recovery', async () => {
+    const { rt, mockFetch } = clock();
+    mockFetch.mockImplementation(async (url) =>
+      String(url) === KEV_URL ? new Response('Unavailable', { status: 503 }) : page([]),
+    );
+    await run(botEnv(), rt);
+    expect(await env.DB.prepare('SELECT next_poll_at, last_error FROM kev_poll_state').first()).toEqual({
+      next_poll_at: NOW + 5 * 60_000,
+      last_error: 'CISA KEV HTTP 503',
+    });
+    expect(await env.DB.prepare('SELECT last_success_at, last_error FROM poll_state').first()).toEqual({
+      last_success_at: NOW,
+      last_error: null,
+    });
   });
 });
 

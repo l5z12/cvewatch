@@ -1,5 +1,6 @@
 import { fetchPage } from './nvd';
 import { pollDelta, refreshRecord } from './cve-list';
+import { pollKev } from './kev';
 import { PARSER_VERSION, pollRecent } from './cve-search';
 import { enqueueStatements, scoreStatements } from './outbox';
 import { edit, enabledChannels, send, validateSecrets } from './messages';
@@ -202,6 +203,19 @@ export async function run(env: BotEnv, rt: Runtime = runtime): Promise<void> {
         .run();
       console.error(
         JSON.stringify({ event: 'poll_failed', error: safeError(error), nextPoll, elapsedMs: rt.now() - now }),
+      );
+    }
+    // The catalog changes a few times a week, so the minute cadence is enough. Live
+    // runs resolve and queue the requests it adds.
+    try {
+      await pollKev(env, rt);
+    } catch (error) {
+      const nextPoll = rt.now() + Math.max(5 * MINUTE, error instanceof ServiceError ? error.retryAfterMs : 0);
+      await env.DB.prepare('UPDATE kev_poll_state SET next_poll_at = ?, last_error = ? WHERE id = 1')
+        .bind(nextPoll, safeError(error))
+        .run();
+      console.error(
+        JSON.stringify({ event: 'kev_poll_failed', error: safeError(error), nextPoll, elapsedMs: rt.now() - now }),
       );
     }
     await deliver(env, rt, now + 45_000);

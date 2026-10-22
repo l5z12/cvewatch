@@ -28,6 +28,15 @@ export interface Cve {
   parser?: number;
   // Sent on request rather than discovered, so it may not be new.
   requested?: boolean;
+  // Sent because the CVE was added to the CISA KEV catalog.
+  kev?: KevDetails;
+}
+
+export interface KevDetails {
+  // Dates as the catalog gives them, such as 2026-10-20.
+  added: string;
+  due: string | null;
+  ransomware: boolean;
 }
 
 export interface Runtime {
